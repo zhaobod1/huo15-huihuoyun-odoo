@@ -1,0 +1,62 @@
+{
+  "id": "odoo",
+  "name": "火一五·辉火云企业套件插件",
+  "description": "自然语言操作辉火云企业套件（Odoo 19）、通知同步、待办管理、活动提醒、日历、消息",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "odoo": {
+        "type": "object",
+        "description": "Odoo 连接配置",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Odoo 系统地址，如 https://www.huo15.com"
+          },
+          "db": {
+            "type": "string",
+            "description": "数据库名称，如 huo15"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名（邮箱或登录名）"
+          },
+          "password": {
+            "type": "string",
+            "description": "密码"
+          }
+        },
+        "required": ["url", "db", "username", "password"]
+      },
+      "sync": {
+        "type": "object",
+        "description": "通知同步配置",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "是否启用后台通知同步",
+            "default": true
+          },
+          "intervalSeconds": {
+            "type": "number",
+            "description": "轮询间隔（秒），默认 30",
+            "default": 30
+          },
+          "channels": {
+            "type": "array",
+            "description": "需要同步的通知类型",
+            "items": {
+              "type": "string",
+              "enum": ["todo", "activity", "message", "email", "calendar"]
+            },
+            "default": ["todo", "activity", "message"]
+          }
+        }
+      }
+    }
+  }
+}
