@@ -1,7 +1,7 @@
 {
-  "name": "@huo15/openclaw-odoo",
-  "version": "1.0.0",
-  "description": "火一五·辉火云企业套件（Odoo 19）龙虾插件 — 自然语言操作Odoo、通知同步、待办管理、活动提醒",
+  "name": "@huo15/huo15-odoo",
+  "version": "1.1.0",
+  "description": "火一五·辉火云助手 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，覆盖任务、CRM、项目、工单、财务、销售",
   "type": "module",
   "main": "index.ts",
   "openclaw": {
@@ -21,7 +21,10 @@
     "odoo",
     "huohuoyun",
     "erp",
-    "huo15"
+    "huo15",
+    "crm",
+    "helpdesk",
+    "invoice"
   ],
   "author": "jobzhao15",
   "license": "MIT",
@@ -38,8 +41,11 @@
     "src/**/*",
     "SKILL.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/zhaobod1/huo15-openclaw-odoo"
+    "url": "https://github.com/zhaobod1/huo15-claude-odoo"
   }
 }
