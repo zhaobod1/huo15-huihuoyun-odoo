@@ -1,5 +1,5 @@
 /**
- * 火一五·辉火云企业套件插件（Odoo 19 Enterprise）v1.1
+ * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.1
  *
  * 新增功能（相比 v1.0）：
  * - CRM 商机管道管理（查看/创建/赢/输/更新）
@@ -40,8 +40,8 @@ const configManager = new ConfigManager();
 
 export default definePluginEntry({
   id: 'odoo',
-  name: '火一五·辉火云企业套件插件',
-  description: '自然语言操作辉火云企业套件（Odoo 19）、实施经理助手、CRM、项目、客服、财务',
+  name: '火一五·辉火云·欧度插件',
+  description: '自然语言操作辉火云·欧度（Odoo 19）、实施经理助手、CRM、项目、客服、财务',
 
   register(api: OpenClawPluginApi) {
     const config = (api.pluginConfig ?? {}) as OdooPluginConfig;
@@ -97,7 +97,7 @@ function getClient(ctx: Record<string, unknown>): OdooClient | undefined {
   return client?.isAuthenticated() ? client : undefined;
 }
 function notConnected() {
-  return { success: false, message: '未连接到辉火云企业套件，请先使用 odoo_connect 工具' };
+  return { success: false, message: '未连接到辉火云·欧度，请先使用 odoo_connect 工具' };
 }
 function getAgentId(ctx: Record<string, unknown>) {
   return (ctx['agentId'] as string | undefined) ?? 'default';
@@ -115,7 +115,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_connect',
-    description: '连接辉火云企业套件（Odoo 19）系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
+    description: '连接辉火云·欧度（Odoo 19）系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
     schema: {
       type: 'object',
       properties: {
@@ -149,14 +149,14 @@ function registerTools(api: OpenClawPluginApi) {
       try {
         await initOdooClient(api, cfg, aid);
         configManager.saveOdooConfig(cfg);
-        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云企业套件！` };
+        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云·欧度！` };
       } catch (e) { return { success: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }; }
     },
   });
 
   api.registerTool({
     name: 'odoo_status',
-    description: '检查辉火云企业套件连接状态',
+    description: '检查辉火云·欧度连接状态',
     schema: { type: 'object', properties: {} },
     async handler(_p: unknown, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
@@ -766,11 +766,11 @@ function registerHooks(api: OpenClawPluginApi) {
     if (!client?.isAuthenticated()) {
       return {
         appendSystemContext: `
-## 辉火云企业套件（Odoo 19）插件 — 未连接
+## 辉火云·欧度（Odoo 19）插件 — 未连接
 
 插件已加载但尚未连接到 Odoo。当用户提到任何 ERP/Odoo 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时等），你必须：
 
-1. 告诉用户需要先连接辉火云企业套件
+1. 告诉用户需要先连接辉火云·欧度
 2. 依次询问以下信息：
    - **系统地址**（URL）：例如 https://www.huo15.com
    - **用户名**（邮箱或登录名）
@@ -778,14 +778,14 @@ function registerHooks(api: OpenClawPluginApi) {
 3. **数据库名不需要主动询问** — odoo_connect 会自动检测。如果只有一个数据库会自动连接；如果有多个数据库，工具会返回列表，届时再让用户选择。
 4. 收集到 URL、用户名、密码后，立即调用 **odoo_connect**（不传 db 参数）
 
-示例引导话术："要操作辉火云企业套件，需要先连接。请提供您的 Odoo 系统地址、用户名和密码。"`.trim(),
+示例引导话术："要操作辉火云·欧度，需要先连接。请提供您的 Odoo 系统地址、用户名和密码。"`.trim(),
       };
     }
 
     const info = client.getSessionInfo();
     return {
       appendSystemContext: `
-## 辉火云企业套件（Odoo 19）已连接
+## 辉火云·欧度（Odoo 19）已连接
 
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
@@ -864,7 +864,7 @@ function handleOdooUpdates(api: OpenClawPluginApi, updates: SyncUpdate[], aid: s
     }
     if (title && body) {
       (api as unknown as Record<string, unknown>)['sendNotification']?.({
-        agentId: aid, title: `辉火云企业套件 — ${title}`, body, data: update,
+        agentId: aid, title: `辉火云·欧度 — ${title}`, body, data: update,
       });
     }
   }

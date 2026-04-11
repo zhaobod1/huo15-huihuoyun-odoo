@@ -1,6 +1,6 @@
 {
   "id": "odoo",
-  "name": "火一五·辉火云Odoo助手",
+  "name": "火一五·辉火云·欧度插件",
   "description": "自然语言操作 Odoo 19 Enterprise，实施经理助手，覆盖任务、CRM、项目、工单、财务、销售",
   "version": "1.1.1",
   "configSchema": {

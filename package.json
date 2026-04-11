@@ -1,7 +1,7 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
   "version": "1.1.1",
-  "description": "火一五·辉火云Odoo助手 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，覆盖任务、CRM、项目、工单、财务、销售",
+  "description": "火一五·辉火云·欧度插件 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，覆盖任务、CRM、项目、工单、财务、销售",
   "type": "module",
   "main": "index.ts",
   "openclaw": {
@@ -46,6 +46,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/zhaobod1/huo15-huihuoyun-odoo"
+    "url": "https://cnb.cool/huo15/tools/huo15-huihuoyun-odoo"
   }
 }

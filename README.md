@@ -1,4 +1,4 @@
-# 火一五·辉火云Odoo助手
+# 火一五·辉火云·欧度插件
 
 ---
 
@@ -25,7 +25,7 @@
 
 ## 简介
 
-**火一五·辉火云Odoo助手** 是 [OpenClaw](https://github.com/nicepkg/openclaw) 的 Odoo 19 Enterprise 插件，让你用自然语言全面操作辉火云企业套件。尤其适合**实施经理、项目经理、销售经理**的日常工作场景。
+**火一五·辉火云·欧度插件** 是 [OpenClaw](https://github.com/nicepkg/openclaw) 的 Odoo 19 Enterprise 插件，让你用自然语言全面操作辉火云企业套件。尤其适合**实施经理、项目经理、销售经理**的日常工作场景。
 
 连接后，龙虾 AI Agent 即可帮你管理待办、跟进商机、查看工单、核对账款、记录工时——一句话搞定。
 
