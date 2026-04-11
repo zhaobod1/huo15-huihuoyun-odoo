@@ -1,5 +1,5 @@
 {
-  "name": "@huo15/huo15-odoo",
+  "name": "@huo15/huo15-huihuoyun-odoo",
   "version": "1.1.0",
   "description": "火一五·辉火云Odoo助手 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，覆盖任务、CRM、项目、工单、财务、销售",
   "type": "module",
