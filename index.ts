@@ -115,24 +115,41 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_connect',
-    description: '连接辉火云企业套件（Odoo 19）系统',
+    description: '连接辉火云企业套件（Odoo 19）系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
     schema: {
       type: 'object',
       properties: {
         url:      { type: 'string', description: 'Odoo 系统地址，如 https://www.huo15.com' },
-        db:       { type: 'string', description: '数据库名称' },
+        db:       { type: 'string', description: '数据库名称（可选，只有一个数据库时可省略）' },
         username: { type: 'string', description: '用户名（邮箱或登录名）' },
         password: { type: 'string', description: '密码' },
       },
-      required: ['url', 'db', 'username', 'password'],
+      required: ['url', 'username', 'password'],
     },
-    async handler(params: { url: string; db: string; username: string; password: string }, ctx: Record<string, unknown>) {
+    async handler(params: { url: string; db?: string; username: string; password: string }, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
-      const cfg = { url: params.url, db: params.db, username: params.username, password: params.password };
+      let db = params.db;
+
+      // 未指定 db 时自动检测
+      if (!db) {
+        try {
+          const dbs = await OdooClient.listDatabases(params.url);
+          if (dbs.length === 0) return { success: false, message: '该 Odoo 实例没有可用的数据库' };
+          if (dbs.length === 1) {
+            db = dbs[0];
+          } else {
+            return { success: false, needSelectDb: true, databases: dbs, message: `检测到 ${dbs.length} 个数据库，请告诉我要连接哪一个：${dbs.join('、')}` };
+          }
+        } catch {
+          return { success: false, message: '无法自动检测数据库列表，请手动提供数据库名称（db 参数）' };
+        }
+      }
+
+      const cfg = { url: params.url, db, username: params.username, password: params.password };
       try {
         await initOdooClient(api, cfg, aid);
         configManager.saveOdooConfig(cfg);
-        return { success: true, message: `已成功连接到 ${params.url}，欢迎使用辉火云企业套件！` };
+        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云企业套件！` };
       } catch (e) { return { success: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }; }
     },
   });
@@ -751,8 +768,17 @@ function registerHooks(api: OpenClawPluginApi) {
         appendSystemContext: `
 ## 辉火云企业套件（Odoo 19）插件 — 未连接
 
-插件已加载，尚未连接到 Odoo。如用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议等），引导使用 **odoo_connect** 工具连接。
-需要：系统地址（URL）、数据库名、用户名（邮箱）、密码。`.trim(),
+插件已加载但尚未连接到 Odoo。当用户提到任何 ERP/Odoo 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时等），你必须：
+
+1. 告诉用户需要先连接辉火云企业套件
+2. 依次询问以下信息：
+   - **系统地址**（URL）：例如 https://www.huo15.com
+   - **用户名**（邮箱或登录名）
+   - **密码**
+3. **数据库名不需要主动询问** — odoo_connect 会自动检测。如果只有一个数据库会自动连接；如果有多个数据库，工具会返回列表，届时再让用户选择。
+4. 收集到 URL、用户名、密码后，立即调用 **odoo_connect**（不传 db 参数）
+
+示例引导话术："要操作辉火云企业套件，需要先连接。请提供您的 Odoo 系统地址、用户名和密码。"`.trim(),
       };
     }
 

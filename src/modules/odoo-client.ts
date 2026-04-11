@@ -78,6 +78,24 @@ export class OdooClient {
 
   isAuthenticated(): boolean { return this.uid !== null; }
   getUid(): number | null { return this.uid; }
+
+  /**
+   * 查询 Odoo 实例可用的数据库列表（无需认证）
+   * Odoo 19 端点: POST /web/database/list
+   */
+  static async listDatabases(url: string): Promise<string[]> {
+    const endpoint = `${url.replace(/\/$/, '')}/web/database/list`;
+    const payload = { jsonrpc: '2.0', method: 'call', id: Date.now(), params: {} };
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const data = await response.json() as { result?: string[]; error?: unknown };
+    if (data.error) throw new Error(`获取数据库列表失败: ${JSON.stringify(data.error)}`);
+    return data.result ?? [];
+  }
   getSessionInfo(): { uid: number | null; username: string; url: string } {
     return { uid: this.uid, username: this.username, url: this.url };
   }
