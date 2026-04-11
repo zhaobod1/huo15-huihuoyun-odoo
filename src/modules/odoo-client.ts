@@ -1,26 +1,17 @@
 /**
- * Odoo JSON-RPC API 客户端
+ * Odoo JSON-RPC API 客户端 — v1.1
  *
- * 支持 Odoo 19 Enterprise 的 JSON-RPC 接口：
- * - 认证：/web/session/authenticate
- * - 通用：/web/dataset/call_kw (search_read / read / create / write / unlink)
- * - 会话：/web/session/get_session_info / destroy
- *
- * 改进点（相比 dev 版）：
- * - ensureAuthenticated()：轮询前自动检查并重连 session，应对 Odoo 服务重启
- * - getSessionInfo()：暴露 url/username/uid，供 before_prompt_build 钩子读取
- * - getInboxNotifications()：查 mail.notification 未读
- * - getTodayActivities()：专用今日活动查询
+ * 支持 Odoo 19 Enterprise 的 JSON-RPC 接口。
+ * 覆盖模块：Session、Project、CRM、Sale、Purchase、
+ *           Helpdesk、Accounting、HR、Stock、Mail/Activity
  */
 
 import type { OdooConfig, OdooSession, OdooRecord, OdooError } from '../types/index.js';
 import { today } from '../utils/date-utils.js';
 
-// Domain 类型
 type DomainItem = string | [string, string, unknown];
 type Domain = DomainItem[];
 
-/** 类型守卫：检查是否为 Odoo 错误响应 */
 function isOdooError(result: unknown): result is { error: OdooError } {
   return typeof result === 'object' && result !== null && 'error' in result;
 }
@@ -43,7 +34,6 @@ export class OdooClient {
 
   // ==================== 会话管理 ====================
 
-  /** 认证登录 */
   async authenticate(): Promise<OdooSession> {
     const result = await this.rpc('/web/session/authenticate', {
       db: this.db,
@@ -56,18 +46,14 @@ export class OdooClient {
     }
 
     const session = result as OdooSession;
-    if (!session.uid) {
-      throw new Error('认证失败：用户名或密码错误');
-    }
+    if (!session.uid) throw new Error('认证失败：用户名或密码错误');
 
     this.uid = session.uid;
     this.session_id = (session as unknown as Record<string, unknown>).session_id as string | null ?? null;
     this.user_context = session.user_context || {};
-
     return session;
   }
 
-  /** 检查当前会话是否仍然有效 */
   async checkSession(): Promise<boolean> {
     try {
       const result = await this.rpc('/web/session/get_session_info', {});
@@ -78,340 +64,417 @@ export class OdooClient {
     }
   }
 
-  /**
-   * 确保已认证 — 轮询前调用。
-   * 如果 session 已过期则自动重新登录。
-   */
   async ensureAuthenticated(): Promise<void> {
     if (!this.isAuthenticated() || !(await this.checkSession())) {
       await this.authenticate();
     }
   }
 
-  /** 销毁会话 */
   async destroy(): Promise<void> {
-    try {
-      await this.rpc('/web/session/destroy', {});
-    } finally {
-      this.uid = null;
-      this.session_id = null;
-      this.user_context = {};
+    try { await this.rpc('/web/session/destroy', {}); } finally {
+      this.uid = null; this.session_id = null; this.user_context = {};
     }
   }
 
-  /** 是否已登录 */
-  isAuthenticated(): boolean {
-    return this.uid !== null;
-  }
-
-  /** 获取当前用户 ID */
-  getUid(): number | null {
-    return this.uid;
-  }
-
-  /** 获取会话摘要（用于系统上下文注入） */
+  isAuthenticated(): boolean { return this.uid !== null; }
+  getUid(): number | null { return this.uid; }
   getSessionInfo(): { uid: number | null; username: string; url: string } {
     return { uid: this.uid, username: this.username, url: this.url };
   }
 
-  // ==================== 通用 ORM 方法 ====================
+  // ==================== 通用 ORM ====================
 
-  /** search_read：搜索并返回记录 */
   async searchRead(
-    model: string,
-    domain: Domain,
-    fields: string[] = ['id', 'name'],
+    model: string, domain: Domain, fields: string[] = ['id', 'name'],
     options: { limit?: number; offset?: number; order?: string } = {},
   ): Promise<{ length: number; records: OdooRecord[] }> {
     const { limit = 100, offset = 0, order = '' } = options;
-
     const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'search_read',
-      args: [domain],
+      model, method: 'search_read', args: [domain],
       kwargs: { fields, domain, limit, offset, order },
     });
-
-    if (isOdooError(result)) {
-      throw new Error(`查询 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    if (isOdooError(result)) throw new Error(`查询 ${model} 失败: ${JSON.stringify(result.error)}`);
     const records = Array.isArray(result) ? result as OdooRecord[] : [];
     return { length: records.length, records };
   }
 
-  /** read：读取指定 ID 的字段 */
   async read(model: string, ids: number[], fields: string[] = ['id', 'name']): Promise<OdooRecord[]> {
-    const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'read',
-      args: [ids],
-      kwargs: { fields },
-    });
-
-    if (isOdooError(result)) {
-      throw new Error(`读取 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    const result = await this.rpc('/web/dataset/call_kw', { model, method: 'read', args: [ids], kwargs: { fields } });
+    if (isOdooError(result)) throw new Error(`读取 ${model} 失败: ${JSON.stringify(result.error)}`);
     return result as OdooRecord[];
   }
 
-  /** create：创建记录，返回新记录 ID */
   async create(model: string, values: Record<string, unknown>): Promise<number> {
-    const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'create',
-      args: [values],
-      kwargs: {},
-    });
-
-    if (isOdooError(result)) {
-      throw new Error(`创建 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    const result = await this.rpc('/web/dataset/call_kw', { model, method: 'create', args: [values], kwargs: {} });
+    if (isOdooError(result)) throw new Error(`创建 ${model} 失败: ${JSON.stringify(result.error)}`);
     return result as number;
   }
 
-  /** write：更新记录 */
   async write(model: string, ids: number[], values: Record<string, unknown>): Promise<boolean> {
-    const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'write',
-      args: [ids, values],
-      kwargs: {},
-    });
-
-    if (isOdooError(result)) {
-      throw new Error(`更新 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    const result = await this.rpc('/web/dataset/call_kw', { model, method: 'write', args: [ids, values], kwargs: {} });
+    if (isOdooError(result)) throw new Error(`更新 ${model} 失败: ${JSON.stringify(result.error)}`);
     return result === true;
   }
 
-  /** unlink：删除记录 */
   async unlink(model: string, ids: number[]): Promise<boolean> {
-    const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'unlink',
-      args: [ids],
-      kwargs: {},
-    });
-
-    if (isOdooError(result)) {
-      throw new Error(`删除 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    const result = await this.rpc('/web/dataset/call_kw', { model, method: 'unlink', args: [ids], kwargs: {} });
+    if (isOdooError(result)) throw new Error(`删除 ${model} 失败: ${JSON.stringify(result.error)}`);
     return result === true;
   }
 
-  /** search_count：统计匹配记录数 */
   async searchCount(model: string, domain: Domain): Promise<number> {
-    const result = await this.rpc('/web/dataset/call_kw', {
-      model,
-      method: 'search_count',
-      args: [domain],
-      kwargs: {},
-    });
-
-    if (isOdooError(result)) {
-      throw new Error(`计数 ${model} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    const result = await this.rpc('/web/dataset/call_kw', { model, method: 'search_count', args: [domain], kwargs: {} });
+    if (isOdooError(result)) throw new Error(`计数 ${model} 失败: ${JSON.stringify(result.error)}`);
     return result as number;
   }
 
-  /** call：调用任意模型方法（通用逃生口） */
-  async call(
-    model: string,
-    method: string,
-    args: unknown[] = [],
-    kwargs: Record<string, unknown> = {},
-  ): Promise<unknown> {
+  async call(model: string, method: string, args: unknown[] = [], kwargs: Record<string, unknown> = {}): Promise<unknown> {
     const result = await this.rpc('/web/dataset/call_kw', { model, method, args, kwargs });
-
-    if (isOdooError(result)) {
-      throw new Error(`调用 ${model}.${method} 失败: ${JSON.stringify(result.error)}`);
-    }
-
+    if (isOdooError(result)) throw new Error(`调用 ${model}.${method} 失败: ${JSON.stringify(result.error)}`);
     return result;
   }
 
-  // ==================== 业务快捷方法 ====================
+  // ==================== Project / Task ====================
 
-  /** 创建待办任务（project.task） */
   async createTask(values: {
-    name: string;
-    description?: string;
-    project_id?: number;
-    date_deadline?: string;
-    user_ids?: number[];
-    priority?: '0' | '1';
+    name: string; description?: string; project_id?: number;
+    date_deadline?: string; user_ids?: number[]; priority?: '0' | '1' | '2' | '3';
   }): Promise<number> {
     return this.create('project.task', {
       name: values.name,
       description: values.description || '',
       project_id: values.project_id || false,
       date_deadline: values.date_deadline || false,
-      user_ids: values.user_ids
-        ? [[6, false, values.user_ids]]
-        : [[6, false, [this.uid ?? 1]]],
+      user_ids: values.user_ids ? [[6, false, values.user_ids]] : [[6, false, [this.uid ?? 1]]],
       priority: values.priority || '0',
       active: true,
     });
   }
 
-  /** 获取我的待办列表 */
-  async getMyTasks(options: {
-    limit?: number;
-    project_id?: number;
-    today_only?: boolean;
+  async getMyTasks(options: { limit?: number; project_id?: number; today_only?: boolean; state?: string } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['user_ids', 'in', [this.uid ?? 0]], ['active', '=', true]];
+    if (options.project_id) domain.push(['project_id', '=', options.project_id]);
+    if (options.today_only) domain.push(['date_deadline', '<=', today()]);
+    if (options.state) domain.push(['state', '=', options.state]);
+    const result = await this.searchRead('project.task', domain,
+      ['id', 'name', 'description', 'date_deadline', 'stage_id', 'project_id', 'priority', 'user_ids', 'state', 'milestone_id'],
+      { limit: options.limit ?? 50 });
+    return result.records;
+  }
+
+  async getProjectOverview(projectId?: number): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (projectId) domain.push(['id', '=', projectId]);
+    const result = await this.searchRead('project.project', domain,
+      ['id', 'name', 'partner_id', 'user_id', 'date_start', 'date', 'task_count', 'open_task_count', 'closed_task_count'],
+      { limit: 50 });
+    return result.records;
+  }
+
+  async getMilestones(projectId?: number): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (projectId) domain.push(['project_id', '=', projectId]);
+    const result = await this.searchRead('project.milestone', domain,
+      ['id', 'name', 'project_id', 'deadline', 'is_reached', 'reached_date', 'task_count', 'done_task_count', 'is_deadline_exceeded'],
+      { limit: 50 });
+    return result.records;
+  }
+
+  async logTimesheet(values: {
+    name: string; unit_amount: number; project_id?: number; task_id?: number; date?: string;
+  }): Promise<number> {
+    return this.create('account.analytic.line', {
+      name: values.name,
+      unit_amount: values.unit_amount,
+      date: values.date || today(),
+      user_id: this.uid ?? 1,
+      project_id: values.project_id || false,
+      task_id: values.task_id || false,
+    });
+  }
+
+  // ==================== CRM ====================
+
+  async getCrmPipeline(options: {
+    limit?: number; stage_id?: number; user_id?: number;
+    type?: 'lead' | 'opportunity'; won_status?: string;
   } = {}): Promise<OdooRecord[]> {
-    const domain: Domain = [
-      ['user_ids', 'in', [this.uid ?? 0]],
-      ['active', '=', true],
-    ];
-
-    if (options.project_id) {
-      domain.push(['project_id', '=', options.project_id]);
-    }
-
-    if (options.today_only) {
-      domain.push(['date_deadline', '<=', today()]);
-    }
-
-    const result = await this.searchRead(
-      'project.task',
-      domain,
-      ['id', 'name', 'description', 'date_deadline', 'stage_id', 'project_id', 'priority', 'user_ids'],
-      { limit: options.limit ?? 50 },
-    );
-
+    const domain: Domain = [['active', '=', true]];
+    if (options.stage_id) domain.push(['stage_id', '=', options.stage_id]);
+    if (options.user_id) domain.push(['user_id', '=', options.user_id]);
+    else domain.push(['user_id', '=', this.uid ?? 0]);
+    if (options.type) domain.push(['type', '=', options.type]);
+    const result = await this.searchRead('crm.lead', domain,
+      ['id', 'name', 'partner_id', 'stage_id', 'probability', 'expected_revenue', 'user_id', 'team_id', 'date_deadline', 'type', 'won_status', 'activity_ids', 'tag_ids'],
+      { limit: options.limit ?? 50, order: 'stage_id asc, probability desc' });
     return result.records;
   }
 
-  /** 获取今日及逾期活动（mail.activity） */
+  async createCrmLead(values: {
+    name: string; type?: 'lead' | 'opportunity'; partner_id?: number;
+    expected_revenue?: number; probability?: number; user_id?: number;
+    stage_id?: number; date_deadline?: string; description?: string;
+  }): Promise<number> {
+    return this.create('crm.lead', {
+      name: values.name,
+      type: values.type || 'opportunity',
+      partner_id: values.partner_id || false,
+      expected_revenue: values.expected_revenue || 0,
+      probability: values.probability || 10,
+      user_id: values.user_id || this.uid || 1,
+      stage_id: values.stage_id || false,
+      date_deadline: values.date_deadline || false,
+      description: values.description || '',
+    });
+  }
+
+  async setCrmWon(leadIds: number[]): Promise<boolean> {
+    await this.call('crm.lead', 'action_set_won', [leadIds]);
+    return true;
+  }
+
+  async setCrmLost(leadIds: number[], lostReasonId?: number): Promise<boolean> {
+    const kwargs: Record<string, unknown> = {};
+    if (lostReasonId) kwargs['additional_values'] = { lost_reason_id: lostReasonId };
+    await this.call('crm.lead', 'action_set_lost', [leadIds], kwargs);
+    return true;
+  }
+
+  async getCrmStages(): Promise<OdooRecord[]> {
+    const result = await this.searchRead('crm.stage', [],
+      ['id', 'name', 'sequence', 'is_won', 'fold'], { order: 'sequence asc' });
+    return result.records;
+  }
+
+  // ==================== Sales ====================
+
+  async getSaleOrders(options: {
+    limit?: number; state?: string; partner_id?: number; user_id?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    else domain.push(['state', 'not in', ['cancel']]);
+    if (options.partner_id) domain.push(['partner_id', '=', options.partner_id]);
+    if (options.user_id) domain.push(['user_id', '=', options.user_id]);
+    const result = await this.searchRead('sale.order', domain,
+      ['id', 'name', 'partner_id', 'state', 'date_order', 'amount_total', 'invoice_status', 'user_id', 'team_id', 'validity_date'],
+      { limit: options.limit ?? 20, order: 'date_order desc' });
+    return result.records;
+  }
+
+  async confirmSaleOrder(orderId: number): Promise<unknown> {
+    return this.call('sale.order', 'action_confirm', [[orderId]]);
+  }
+
+  // ==================== Purchase ====================
+
+  async getPurchaseOrders(options: { limit?: number; state?: string } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    else domain.push(['state', 'not in', ['cancel']]);
+    const result = await this.searchRead('purchase.order', domain,
+      ['id', 'name', 'partner_id', 'state', 'date_order', 'date_planned', 'amount_total', 'invoice_status', 'user_id'],
+      { limit: options.limit ?? 20, order: 'date_order desc' });
+    return result.records;
+  }
+
+  // ==================== Helpdesk ====================
+
+  async getHelpdeskTickets(options: {
+    limit?: number; stage_id?: number; user_id?: number; priority?: string;
+    partner_id?: number; team_id?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (options.user_id !== undefined) domain.push(['user_id', '=', options.user_id]);
+    if (options.stage_id) domain.push(['stage_id', '=', options.stage_id]);
+    if (options.priority) domain.push(['priority', '=', options.priority]);
+    if (options.partner_id) domain.push(['partner_id', '=', options.partner_id]);
+    if (options.team_id) domain.push(['team_id', '=', options.team_id]);
+    const result = await this.searchRead('helpdesk.ticket', domain,
+      ['id', 'name', 'ticket_ref', 'team_id', 'stage_id', 'user_id', 'partner_id', 'priority', 'kanban_state', 'sla_deadline', 'sla_fail', 'create_date', 'close_date'],
+      { limit: options.limit ?? 30, order: 'priority desc, create_date desc' });
+    return result.records;
+  }
+
+  async createHelpdeskTicket(values: {
+    name: string; team_id?: number; partner_id?: number;
+    description?: string; priority?: '0' | '1' | '2' | '3'; user_id?: number;
+  }): Promise<number> {
+    return this.create('helpdesk.ticket', {
+      name: values.name,
+      team_id: values.team_id || false,
+      partner_id: values.partner_id || false,
+      description: values.description || '',
+      priority: values.priority || '0',
+      user_id: values.user_id || false,
+    });
+  }
+
+  async getHelpdeskStages(teamId?: number): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (teamId) domain.push(['team_ids', 'in', [teamId]]);
+    const result = await this.searchRead('helpdesk.stage', domain,
+      ['id', 'name', 'sequence', 'fold'], { order: 'sequence asc' });
+    return result.records;
+  }
+
+  // ==================== Accounting ====================
+
+  async getInvoices(options: {
+    limit?: number; move_type?: string; state?: string;
+    partner_id?: number; payment_state?: string;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['move_type', 'in', options.move_type
+      ? [options.move_type]
+      : ['out_invoice', 'out_refund', 'in_invoice', 'in_refund']]];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.partner_id) domain.push(['partner_id', '=', options.partner_id]);
+    if (options.payment_state) domain.push(['payment_state', '=', options.payment_state]);
+    const result = await this.searchRead('account.move', domain,
+      ['id', 'name', 'move_type', 'partner_id', 'state', 'invoice_date', 'invoice_date_due', 'amount_total', 'payment_state', 'invoice_status'],
+      { limit: options.limit ?? 20, order: 'invoice_date desc' });
+    return result.records;
+  }
+
+  async getOverdueInvoices(): Promise<OdooRecord[]> {
+    const result = await this.searchRead('account.move', [
+      ['move_type', '=', 'out_invoice'],
+      ['state', '=', 'posted'],
+      ['payment_state', 'not in', ['paid', 'reversed']],
+      ['invoice_date_due', '<', today()],
+    ],
+      ['id', 'name', 'partner_id', 'invoice_date_due', 'amount_total', 'payment_state'],
+      { limit: 30, order: 'invoice_date_due asc' });
+    return result.records;
+  }
+
+  // ==================== HR ====================
+
+  async getEmployees(options: { limit?: number; department_id?: number; active?: boolean } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', options.active !== false]];
+    if (options.department_id) domain.push(['department_id', '=', options.department_id]);
+    const result = await this.searchRead('hr.employee', domain,
+      ['id', 'name', 'department_id', 'job_id', 'work_email', 'mobile_phone', 'parent_id', 'user_id'],
+      { limit: options.limit ?? 50 });
+    return result.records;
+  }
+
+  // ==================== Mail / Activity ====================
+
   async getTodayActivities(options: { limit?: number } = {}): Promise<OdooRecord[]> {
-    const result = await this.searchRead(
-      'mail.activity',
-      [
-        ['user_id', '=', this.uid ?? 0],
-        ['date_deadline', '<=', today()],
-      ],
+    const result = await this.searchRead('mail.activity',
+      [['user_id', '=', this.uid ?? 0], ['date_deadline', '<=', today()]],
       ['id', 'summary', 'date_deadline', 'activity_type_id', 'res_model', 'res_id', 'note', 'state'],
-      { limit: options.limit ?? 50 },
-    );
-
+      { limit: options.limit ?? 50 });
     return result.records;
   }
 
-  /** 创建活动提醒（mail.activity） */
   async createActivity(values: {
-    res_model: string;
-    res_id: number;
-    activity_type_id: number;
-    summary?: string;
-    note?: string;
-    date_deadline: string;
-    user_id?: number;
+    res_model: string; res_id: number; activity_type_id: number;
+    summary?: string; note?: string; date_deadline: string; user_id?: number;
   }): Promise<number> {
     return this.create('mail.activity', {
-      res_model: values.res_model,
-      res_id: values.res_id,
+      res_model: values.res_model, res_id: values.res_id,
       activity_type_id: values.activity_type_id,
-      summary: values.summary || '',
-      note: values.note || '',
+      summary: values.summary || '', note: values.note || '',
       date_deadline: values.date_deadline,
       user_id: values.user_id ?? this.uid ?? 1,
     });
   }
 
-  /** 创建日历事件（calendar.event） */
+  async getActivityTypes(): Promise<OdooRecord[]> {
+    const result = await this.searchRead('mail.activity.type', [],
+      ['id', 'name', 'icon', 'category', 'delay_count', 'delay_unit'], { order: 'name asc' });
+    return result.records;
+  }
+
   async createCalendarEvent(values: {
-    name: string;
-    start: string;
-    stop: string;
-    description?: string;
-    partner_ids?: number[];
-    alarm_ids?: number[];
+    name: string; start: string; stop: string;
+    description?: string; partner_ids?: number[]; alarm_ids?: number[];
   }): Promise<number> {
     return this.create('calendar.event', {
-      name: values.name,
-      start: values.start,
-      stop: values.stop,
+      name: values.name, start: values.start, stop: values.stop,
       description: values.description || '',
-      partner_ids: values.partner_ids
-        ? [[6, false, values.partner_ids]]
-        : [[6, false, [this.uid ?? 1]]],
+      partner_ids: values.partner_ids ? [[6, false, values.partner_ids]] : [[6, false, [this.uid ?? 1]]],
       alarm_ids: values.alarm_ids ? [[6, false, values.alarm_ids]] : false,
     });
   }
 
-  /** 获取未读消息（mail.message） */
   async getUnreadMessages(options: { limit?: number } = {}): Promise<OdooRecord[]> {
-    const result = await this.searchRead(
-      'mail.message',
-      [
-        ['message_type', '!=', 'notification'],
-        ['to_read', '=', true],
-      ],
+    const result = await this.searchRead('mail.message',
+      [['message_type', '!=', 'notification'], ['to_read', '=', true]],
       ['id', 'body', 'date', 'author_id', 'model', 'res_id', 'subject'],
-      { limit: options.limit ?? 20 },
-    );
-
+      { limit: options.limit ?? 20 });
     return result.records;
   }
 
-  /** 获取未读收件箱通知（mail.notification） */
   async getInboxNotifications(options: { limit?: number } = {}): Promise<OdooRecord[]> {
-    const result = await this.searchRead(
-      'mail.notification',
-      [
-        ['is_read', '=', false],
-        ['notification_type', '=', 'inbox'],
-      ],
+    const result = await this.searchRead('mail.notification',
+      [['is_read', '=', false], ['notification_type', '=', 'inbox']],
       ['id', 'mail_message_id', 'notification_status', 'is_read', 'read_date'],
-      { limit: options.limit ?? 20 },
-    );
-
+      { limit: options.limit ?? 20 });
     return result.records;
+  }
+
+  // ==================== 实施经理每日概况 ====================
+
+  async getDailyBriefing(): Promise<{
+    todayTasks: OdooRecord[];
+    overdueActivities: OdooRecord[];
+    openTickets: OdooRecord[];
+    overdueInvoices: OdooRecord[];
+    crmFollowUps: OdooRecord[];
+    unreadMessages: OdooRecord[];
+  }> {
+    const uid = this.uid ?? 0;
+    const [todayTasks, overdueActivities, openTickets, overdueInvoices, crmFollowUps, unreadMessages] = await Promise.all([
+      // 今日截止任务
+      this.searchRead('project.task',
+        [['user_ids', 'in', [uid]], ['active', '=', true], ['date_deadline', '<=', today()]],
+        ['id', 'name', 'project_id', 'date_deadline', 'priority', 'stage_id'], { limit: 20 }),
+      // 逾期活动
+      this.searchRead('mail.activity',
+        [['user_id', '=', uid], ['date_deadline', '<=', today()]],
+        ['id', 'summary', 'date_deadline', 'activity_type_id', 'res_model', 'res_id', 'state'], { limit: 20 }),
+      // 我的待处理工单
+      this.searchRead('helpdesk.ticket',
+        [['user_id', '=', uid], ['active', '=', true]],
+        ['id', 'name', 'ticket_ref', 'priority', 'stage_id', 'sla_deadline', 'sla_fail'], { limit: 10 }).catch(() => ({ records: [] })),
+      // 逾期应收发票
+      this.getOverdueInvoices().then(r => ({ records: r })).catch(() => ({ records: [] })),
+      // 需要跟进的商机（today activities）
+      this.searchRead('crm.lead',
+        [['user_id', '=', uid], ['active', '=', true], ['activity_date_deadline', '<=', today()]],
+        ['id', 'name', 'partner_id', 'stage_id', 'probability', 'expected_revenue', 'activity_summary'], { limit: 10 }).catch(() => ({ records: [] })),
+      // 未读消息
+      this.searchRead('mail.message',
+        [['message_type', '!=', 'notification'], ['to_read', '=', true]],
+        ['id', 'subject', 'author_id', 'date', 'model', 'res_id'], { limit: 10 }),
+    ]);
+
+    return {
+      todayTasks: todayTasks.records,
+      overdueActivities: overdueActivities.records,
+      openTickets: openTickets.records,
+      overdueInvoices: overdueInvoices.records,
+      crmFollowUps: crmFollowUps.records,
+      unreadMessages: unreadMessages.records,
+    };
   }
 
   // ==================== 私有传输层 ====================
 
   private async rpc(endpoint: string, params: Record<string, unknown>): Promise<unknown> {
     const url = `${this.url}${endpoint}`;
+    const payload = { jsonrpc: '2.0', method: 'call', id: Date.now(), params };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.session_id) headers['Cookie'] = `session_id=${this.session_id}`;
 
-    const payload = {
-      jsonrpc: '2.0',
-      method: 'call',
-      id: Date.now(),
-      params,
-    };
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-
-    if (this.session_id) {
-      headers['Cookie'] = `session_id=${this.session_id}`;
-    }
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
     const data = await response.json() as { result?: unknown; error?: OdooError };
-
-    if (data.error) {
-      return { error: data.error };
-    }
-
+    if (data.error) return { error: data.error };
     return data.result;
   }
 }
