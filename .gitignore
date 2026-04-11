@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
+!src/**/*.d.ts
+
+.env
+.env.*
+*.log
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# OpenClaw local config
+openclaw.plugin.local.json
