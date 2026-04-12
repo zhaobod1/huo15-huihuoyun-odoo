@@ -10,9 +10,9 @@
  * - HR 员工查询、考勤、请假
  * - 审批流查询
  *
- * 工具清单（共 32 个）：
+ * 工具清单（共 33 个）：
  * 连接     odoo_connect, odoo_status, odoo_disconnect
- * 任务     odoo_create_task, odoo_list_tasks, odoo_update_task
+ * 任务     odoo_create_task, odoo_list_tasks, odoo_update_task, odoo_get_task_stages
  * 活动     odoo_create_activity, odoo_list_activities, odoo_activity_types
  * 日历     odoo_create_event
  * 消息     odoo_get_messages, odoo_send_message
@@ -219,52 +219,74 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_list_tasks',
-    description: '查看待办任务列表。today_only=true 只看今日截止。',
+    description: '查看我的待办任务（To-Do 应用，私人任务，无项目）。默认只看进行中。',
     schema: {
       type: 'object',
       properties: {
-        limit:      { type: 'number',  description: '上限，默认50' },
-        project_id: { type: 'number',  description: '按项目筛选' },
-        today_only: { type: 'boolean', description: '只看今日截止' },
-        state:      { type: 'string',  description: '状态：01_in_progress / 1_done / 1_canceled' },
+        limit:          { type: 'number',  description: '上限，默认50' },
+        project_id:     { type: 'number',  description: '指定项目ID（指定后切换到项目任务模式）' },
+        today_only:     { type: 'boolean', description: '只看今日截止' },
+        stage_state:    { type: 'string',  description: "任务状态：in_progress（进行中，默认）/ done（已完成）/ all（全部）" },
+        state_filter:   { type: 'string',  description: "直接指定 state 值：01_in_progress / 02_changes_requested / 03_approved / 1_done / 1_canceled / 04_waiting_normal" },
+        stage_id:       { type: 'number',  description: '指定具体阶段ID' },
+        include_project: { type: 'boolean', description: 'true=同时包含项目任务（默认 false，仅待办私人任务）' },
       },
     },
-    async handler(p: { limit?: number; project_id?: number; today_only?: boolean; state?: string }, ctx: Record<string, unknown>) {
+    async handler(p: { limit?: number; project_id?: number; today_only?: boolean; stage_state?: string; state_filter?: string; stage_id?: number; include_project?: boolean }, ctx: Record<string, unknown>) {
       const client = getClient(ctx);
       if (!client) return notConnected();
       try {
-        const tasks = await client.getMyTasks({ limit: p.limit, project_id: p.project_id, today_only: p.today_only, state: p.state });
-        return { success: true, count: tasks.length, tasks: tasks.map(t => ({ id: t['id'], name: t['name'], project: t['project_id'], deadline: t['date_deadline'], priority: t['priority'], stage: t['stage_id'], state: t['state'] })) };
+        const tasks = await client.getMyTasks({ limit: p.limit, project_id: p.project_id, today_only: p.today_only, stage_state: p.stage_state as 'in_progress' | 'done' | 'all', state_filter: p.state_filter, stage_id: p.stage_id, include_project: p.include_project });
+        return { success: true, count: tasks.length, tasks: tasks.map(t => ({ id: t['id'], name: t['name'], project: t['project_id'], deadline: t['date_deadline'], priority: t['priority'], stage_id: t['stage_id'], state: t['state'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_get_task_stages',
+    description: '查看项目任务阶段列表（stage_id），用于 odoo_update_task 时指定正确的阶段ID。',
+    schema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: '项目ID（可选，不填则返回所有阶段）' },
+      },
+    },
+    async handler(p: { project_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const stages = await client.getTaskStages(p.project_id);
+        return { success: true, count: stages.length, stages: stages.map(s => ({ id: s['id'], name: s['name'], fold: s['fold'], is_done_stage: s['fold'] })) };
       } catch (e) { return { success: false, message: String(e) }; }
     },
   });
 
   api.registerTool({
     name: 'odoo_update_task',
-    description: '更新任务的状态、截止日期、优先级等字段。',
+    description: '更新任务的阶段（状态）、截止日期、优先级等字段。通过 stage_id 改变任务的工作流状态。',
     schema: {
       type: 'object',
       properties: {
         task_id:       { type: 'number', description: '任务ID（必填）' },
         name:          { type: 'string', description: '新名称' },
-        state:         { type: 'string', description: '新状态：01_in_progress / 1_done / 1_canceled / 03_approved' },
-        stage_id:      { type: 'number', description: '新阶段ID' },
+        stage_id:      { type: 'number', description: '新阶段ID（stage_id），用于改变任务状态' },
         date_deadline: { type: 'string', description: '新截止日期 YYYY-MM-DD' },
         priority:      { type: 'string', enum: ['0','1','2','3'], description: '新优先级' },
         description:   { type: 'string', description: '新描述' },
+        active:       { type: 'boolean', description: '任务激活状态，false=归档' },
       },
       required: ['task_id'],
     },
-    async handler(p: { task_id: number; name?: string; state?: string; stage_id?: number; date_deadline?: string; priority?: string; description?: string }, ctx: Record<string, unknown>) {
+    async handler(p: { task_id: number; name?: string; stage_id?: number; date_deadline?: string; priority?: string; description?: string; active?: boolean }, ctx: Record<string, unknown>) {
       const client = getClient(ctx);
       if (!client) return notConnected();
       const values: Record<string, unknown> = {};
-      if (p.name) values['name'] = p.name;
-      if (p.state) values['state'] = p.state;
-      if (p.stage_id) values['stage_id'] = p.stage_id;
-      if (p.date_deadline) values['date_deadline'] = p.date_deadline;
-      if (p.priority) values['priority'] = p.priority;
-      if (p.description) values['description'] = p.description;
+      if (p.name !== undefined) values['name'] = p.name;
+      if (p.stage_id !== undefined) values['stage_id'] = p.stage_id;
+      if (p.date_deadline !== undefined) values['date_deadline'] = p.date_deadline || false;
+      if (p.priority !== undefined) values['priority'] = p.priority;
+      if (p.description !== undefined) values['description'] = p.description;
+      if (p.active !== undefined) values['active'] = p.active;
       try {
         await client.write('project.task', [p.task_id], values);
         return { success: true, message: `任务 #${p.task_id} 已更新` };
@@ -1042,7 +1064,7 @@ function registerHooks(api: OpenClawPluginApi) {
 | 今天有什么工作 / 每日概况 | **odoo_daily_briefing** |
 | 帮我写个待办 / 创建任务 | **odoo_create_task** |
 | 今日截止任务 / 今天要做什么 | **odoo_list_tasks**(today_only=true) |
-| 把任务 #X 标记完成 | **odoo_update_task**(state="1_done") |
+| 把任务 #X 标记完成 | **odoo_update_task**(stage_id=已完成阶段ID) |
 | 提醒我… | **odoo_create_activity** |
 | 安排会议 / 约个时间 | **odoo_create_event** |
 | 查看商机 / 销售管道 | **odoo_crm_pipeline** |

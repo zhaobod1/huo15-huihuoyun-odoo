@@ -169,14 +169,69 @@ export class OdooClient {
     });
   }
 
-  async getMyTasks(options: { limit?: number; project_id?: number; today_only?: boolean; state?: string } = {}): Promise<OdooRecord[]> {
-    const domain: Domain = [['user_ids', 'in', [this.uid ?? 0]], ['active', '=', true]];
-    if (options.project_id) domain.push(['project_id', '=', options.project_id]);
+  /**
+   * 获取我的任务（待办）
+   *
+   * Odoo 待办应用（To-Do）基于 project.task 模型，
+   * 过滤条件：project_id=False（无项目=私人任务）
+   * 项目任务在「项目」应用中管理，不在待办里。
+   *
+   * Odoo project.task 状态机制：
+   * - state 字段：01_in_progress / 04_waiting_normal / 1_done / 1_canceled 等
+   * - is_closed = state in ['1_done', '1_canceled']
+   *
+   * stage_state 选项：
+   *   'in_progress' — 进行中（未关闭，默认）
+   *   'done'        — 已完成
+   *   'all'         — 全部
+   *
+   * include_project — 是否包含项目任务（默认 false，待办应用模式）
+   */
+  async getMyTasks(options: {
+    limit?: number;
+    project_id?: number;
+    today_only?: boolean;
+    stage_state?: 'in_progress' | 'done' | 'all';
+    state_filter?: string;
+    stage_id?: number;
+    include_project?: boolean;
+  } = {}): Promise<OdooRecord[]> {
+    // 待办应用过滤：project_id=False（私人任务），排除子任务
+    // 项目任务（project_id 有值）属于「项目」应用，不在待办里
+    const domain: Domain = [['user_ids', 'in', [this.uid ?? 0]], ['active', '=', true], ['project_id', '=', false], ['parent_id', '=', false]];
+    if (options.project_id) {
+      // 如果指定了 project_id，则切换到项目任务模式
+      domain.length = 0;
+      domain.push(['user_ids', 'in', [this.uid ?? 0]], ['active', '=', true], ['project_id', '=', options.project_id]);
+    }
     if (options.today_only) domain.push(['date_deadline', '<=', today()]);
-    if (options.state) domain.push(['state', '=', options.state]);
+
+    const stageState = options.stage_state ?? 'in_progress';
+    if (stageState === 'in_progress') {
+      domain.push(['state', 'not in', ['1_done', '1_canceled']]);
+    } else if (stageState === 'done') {
+      domain.push(['state', 'in', ['1_done', '1_canceled']]);
+    }
+
+    if (options.state_filter) {
+      domain.length = domain.filter(d => !Array.isArray(d) || d[0] !== 'state').length;
+      domain.push(['state', '=', options.state_filter]);
+    }
+
+    if (options.stage_id) domain.push(['stage_id', '=', options.stage_id]);
+
     const result = await this.searchRead('project.task', domain,
-      ['id', 'name', 'description', 'date_deadline', 'stage_id', 'project_id', 'priority', 'user_ids', 'state', 'milestone_id'],
+      ['id', 'name', 'description', 'date_deadline', 'stage_id', 'project_id', 'priority', 'user_ids', 'milestone_id', 'state'],
       { limit: options.limit ?? 50 });
+    return result.records;
+  }
+
+  /** 获取项目任务阶段列表（用于查找 stage_id） */
+  async getTaskStages(projectId?: number): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (projectId) domain.push(['project_ids', '=', projectId]);
+    const result = await this.searchRead('project.task.type', domain,
+      ['id', 'name', 'fold', 'sequence'], { order: 'sequence asc' });
     return result.records;
   }
 
