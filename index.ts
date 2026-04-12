@@ -1,18 +1,17 @@
 /**
- * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.1
+ * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.2
  *
- * 新增功能（相比 v1.0）：
- * - CRM 商机管道管理（查看/创建/赢/输/更新）
- * - 项目里程碑 & 工时记录
- * - 销售订单 & 采购订单查询
- * - 客服工单（Helpdesk）查询/创建
- * - 应收发票 & 逾期账款
- * - 任务状态更新
- * - 活动类型查询
- * - 实施经理每日概况（odoo_daily_briefing）
+ * v1.2 新增：
+ * - 每个 WeCom 动态 agent 用户独立的 Odoo 凭据存储
+ * - 首次使用自动引导输入系统地址、用户名、密码
+ * - 数据库自动检测（单库自动连接，多库让用户选择）
+ * - 联系人/客户管理（查询、创建）
+ * - 库存查询（库存量、调拨单）
+ * - HR 员工查询、考勤、请假
+ * - 审批流查询
  *
- * 工具清单（共 23 个）：
- * 连接     odoo_connect, odoo_status
+ * 工具清单（共 32 个）：
+ * 连接     odoo_connect, odoo_status, odoo_disconnect
  * 任务     odoo_create_task, odoo_list_tasks, odoo_update_task
  * 活动     odoo_create_activity, odoo_list_activities, odoo_activity_types
  * 日历     odoo_create_event
@@ -23,6 +22,10 @@
  * 销售     odoo_sale_orders, odoo_purchase_orders
  * 客服     odoo_tickets, odoo_ticket_create
  * 财务     odoo_invoices
+ * 联系人   odoo_contacts, odoo_contact_create
+ * 库存     odoo_stock_levels, odoo_stock_pickings
+ * HR       odoo_employees, odoo_leaves, odoo_attendances
+ * 审批     odoo_approvals
  * 助手     odoo_daily_briefing
  */
 
@@ -41,34 +44,21 @@ const configManager = new ConfigManager();
 export default definePluginEntry({
   id: 'odoo',
   name: '火一五·辉火云·欧度插件',
-  description: '自然语言操作辉火云·欧度（Odoo 19）、实施经理助手、CRM、项目、客服、财务',
+  description: '自然语言操作辉火云·欧度（Odoo 19），实施经理助手，per-agent 凭据隔离',
 
   register(api: OpenClawPluginApi) {
-    const config = (api.pluginConfig ?? {}) as OdooPluginConfig;
-
-    if (config.odoo) {
-      initOdooClient(api, config.odoo).catch(err =>
-        api.logger.error(`[odoo] 初始化失败: ${err instanceof Error ? err.message : String(err)}`));
-    } else {
-      const saved = configManager.load();
-      if (saved?.odoo) {
-        api.logger.info('[odoo] 恢复本地保存的 Odoo 连接...');
-        initOdooClient(api, saved.odoo).catch(err =>
-          api.logger.error(`[odoo] 恢复失败: ${err instanceof Error ? err.message : String(err)}`));
-      }
-    }
-
+    // 不在启动时全局连接。每个 agent 的连接在 before_prompt_build 或 odoo_connect 时按需恢复。
     registerTools(api);
     registerHooks(api);
-    api.logger.info('[odoo] 插件 v1.1 已加载');
+    api.logger.info('[odoo] 插件 v1.2 已加载（per-agent 隔离模式）');
   },
 });
 
-// ── 初始化客户端 ──────────────────────────────────────────────────────────────
+// ── 初始化客户端（per-agent）─────────────────────────────────────────────────
 async function initOdooClient(
   api: OpenClawPluginApi,
   odooConfig: NonNullable<OdooPluginConfig['odoo']>,
-  agentId = 'default',
+  agentId: string = 'default',
 ): Promise<OdooClient> {
   const client = new OdooClient(odooConfig);
   await client.authenticate();
@@ -86,27 +76,41 @@ async function initOdooClient(
       { intervalSeconds: syncConfig.intervalSeconds, channels: syncConfig.channels });
   }
 
-  api.logger.info(`[odoo] 已连接 ${odooConfig.url}，uid=${client.getUid()}`);
+  api.logger.info(`[odoo] agent=${agentId} 已连接 ${odooConfig.url}，uid=${client.getUid()}`);
   return client;
+}
+
+/** 尝试从持久化配置恢复 agent 连接（静默，不抛错） */
+async function tryRestoreAgent(api: OpenClawPluginApi, agentId: string): Promise<OdooClient | undefined> {
+  if (odooClients.get(agentId)?.isAuthenticated()) return odooClients.get(agentId);
+  const saved = configManager.load(agentId);
+  if (!saved?.odoo) return undefined;
+  try {
+    api.logger.info(`[odoo] 恢复 agent=${agentId} 的连接...`);
+    return await initOdooClient(api, saved.odoo, agentId);
+  } catch (err) {
+    api.logger.error(`[odoo] agent=${agentId} 恢复失败: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
 }
 
 // ── 工具辅助 ──────────────────────────────────────────────────────────────────
 function getClient(ctx: Record<string, unknown>): OdooClient | undefined {
-  const aid = (ctx['agentId'] as string | undefined) ?? 'default';
+  const aid = getAgentId(ctx);
   const client = odooClients.get(aid);
   return client?.isAuthenticated() ? client : undefined;
 }
 function notConnected() {
-  return { success: false, message: '未连接到辉火云·欧度，请先使用 odoo_connect 工具' };
+  return { success: false, message: '未连接到辉火云·欧度，请先提供系统地址、用户名和密码进行连接。' };
 }
 function getAgentId(ctx: Record<string, unknown>) {
-  return (ctx['agentId'] as string | undefined) ?? 'default';
+  return (ctx['agentId'] as string | undefined)?.trim() || 'default';
 }
 function stripHtml(html: string) {
   return String(html ?? '').replace(/<[^>]+>/g, '').trim().substring(0, 300);
 }
 
-// ── 注册工具 ──────────────────────────────────────────────────────────────────
+// ── 注册工具（共 32 个）──────────────────────────────────────────────────────
 function registerTools(api: OpenClawPluginApi) {
 
   // ══════════════════════════════════════════════════════
@@ -148,7 +152,7 @@ function registerTools(api: OpenClawPluginApi) {
       const cfg = { url: params.url, db, username: params.username, password: params.password };
       try {
         await initOdooClient(api, cfg, aid);
-        configManager.saveOdooConfig(cfg);
+        configManager.saveOdooConfig(cfg, aid);
         return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云·欧度！` };
       } catch (e) { return { success: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }; }
     },
@@ -162,7 +166,25 @@ function registerTools(api: OpenClawPluginApi) {
       const aid = getAgentId(ctx);
       const client = odooClients.get(aid);
       const info = client?.getSessionInfo();
-      return { success: true, connected: client?.isAuthenticated() ?? false, uid: info?.uid ?? null, username: info?.username ?? null, url: info?.url ?? null, polling: pollers.get(aid)?.getStatus() ?? null };
+      return { success: true, connected: client?.isAuthenticated() ?? false, agentId: aid, uid: info?.uid ?? null, username: info?.username ?? null, url: info?.url ?? null, polling: pollers.get(aid)?.getStatus() ?? null };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_disconnect',
+    description: '断开辉火云·欧度连接并清除已保存的凭据。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const aid = getAgentId(ctx);
+      pollers.get(aid)?.stop();
+      pollers.delete(aid);
+      const client = odooClients.get(aid);
+      if (client) {
+        try { await client.destroy(); } catch { /* ignore */ }
+        odooClients.delete(aid);
+      }
+      configManager.clear(aid);
+      return { success: true, message: '已断开连接并清除凭据。如需重新连接，请提供系统地址、用户名和密码。' };
     },
   });
 
@@ -512,7 +534,7 @@ function registerTools(api: OpenClawPluginApi) {
       if (!client) return notConnected();
       try {
         await client.setCrmWon([p.lead_id]);
-        return { success: true, message: `商机 #${p.lead_id} 已标记为赢单 🎉` };
+        return { success: true, message: `商机 #${p.lead_id} 已标记为赢单` };
       } catch (e) { return { success: false, message: String(e) }; }
     },
   });
@@ -721,6 +743,205 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // 联系人 / 客户（v1.2 新增）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_contacts',
+    description: '查询联系人/客户/供应商。用于"查客户"、"找供应商"、"搜索联系人"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:       { type: 'string',  description: '按名称模糊搜索' },
+        is_company:    { type: 'boolean', description: 'true=只看公司 false=只看个人' },
+        customer_only: { type: 'boolean', description: '只看客户' },
+        supplier_only: { type: 'boolean', description: '只看供应商' },
+        limit:         { type: 'number',  description: '上限，默认30' },
+      },
+    },
+    async handler(p: { keyword?: string; is_company?: boolean; customer_only?: boolean; supplier_only?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const contacts = await client.getPartners({ keyword: p.keyword, is_company: p.is_company, customer_rank: p.customer_only, supplier_rank: p.supplier_only, limit: p.limit });
+        return { success: true, count: contacts.length, contacts: contacts.map(c => ({ id: c['id'], name: c['name'], email: c['email'], phone: c['phone'], mobile: c['mobile'], is_company: c['is_company'], city: c['city'], country: c['country_id'], parent: c['parent_id'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_contact_create',
+    description: '创建联系人/客户/供应商。用于"添加新客户"、"创建联系人"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:       { type: 'string',  description: '名称（必填）' },
+        email:      { type: 'string',  description: '邮箱' },
+        phone:      { type: 'string',  description: '电话' },
+        mobile:     { type: 'string',  description: '手机' },
+        is_company: { type: 'boolean', description: '是否公司，默认false' },
+        city:       { type: 'string',  description: '城市' },
+        street:     { type: 'string',  description: '街道/地址' },
+        parent_id:  { type: 'number',  description: '所属公司ID（个人联系人时）' },
+        is_customer:{ type: 'boolean', description: '标记为客户，默认true' },
+        is_supplier:{ type: 'boolean', description: '标记为供应商，默认false' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; email?: string; phone?: string; mobile?: string; is_company?: boolean; city?: string; street?: string; parent_id?: number; is_customer?: boolean; is_supplier?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createPartner({
+          name: p.name, email: p.email, phone: p.phone, mobile: p.mobile,
+          is_company: p.is_company, city: p.city, street: p.street, parent_id: p.parent_id,
+          customer_rank: (p.is_customer !== false) ? 1 : 0,
+          supplier_rank: p.is_supplier ? 1 : 0,
+        });
+        return { success: true, contactId: id, message: `${p.is_company ? '公司' : '联系人'}「${p.name}」已创建，ID: ${id}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
+  // 库存（v1.2 新增）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_stock_levels',
+    description: '查看库存水平。用于"查库存"、"产品XX还有多少"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:     { type: 'string', description: '按产品名称模糊搜索' },
+        product_id:  { type: 'number', description: '按产品ID筛选' },
+        location_id: { type: 'number', description: '按库位筛选' },
+        limit:       { type: 'number', description: '上限，默认50' },
+      },
+    },
+    async handler(p: { keyword?: string; product_id?: number; location_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const stocks = await client.getStockLevels({ keyword: p.keyword, product_id: p.product_id, location_id: p.location_id, limit: p.limit });
+        return { success: true, count: stocks.length, stock: stocks.map(s => ({ id: s['id'], product: s['product_id'], location: s['location_id'], lot: s['lot_id'], quantity: s['quantity'], reserved: s['reserved_quantity'], available: s['available_quantity'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_stock_pickings',
+    description: '查看调拨单/出入库单。用于"查看待出库"、"调拨单情况"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: '上限，默认20' },
+        state: { type: 'string', enum: ['draft','waiting','confirmed','assigned','done','cancel'], description: '状态：assigned=就绪 waiting=等待 done=完成' },
+        type:  { type: 'string', enum: ['incoming','outgoing','internal'], description: '类型：incoming=入库 outgoing=出库 internal=内部调拨' },
+      },
+    },
+    async handler(p: { limit?: number; state?: string; type?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const pickings = await client.getStockPickings({ limit: p.limit, state: p.state, picking_type: p.type });
+        return { success: true, count: pickings.length, pickings: pickings.map(pk => ({ id: pk['id'], name: pk['name'], partner: pk['partner_id'], type: pk['picking_type_id'], state: pk['state'], scheduled: pk['scheduled_date'], done: pk['date_done'], origin: pk['origin'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
+  // HR 员工 / 考勤 / 请假（v1.2 新增）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_employees',
+    description: '查询员工列表。用于"查员工"、"某部门有谁"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:       { type: 'string', description: '按名称模糊搜索' },
+        department_id: { type: 'number', description: '按部门ID筛选' },
+        limit:         { type: 'number', description: '上限，默认50' },
+      },
+    },
+    async handler(p: { keyword?: string; department_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const emps = await client.getEmployees({ keyword: p.keyword, department_id: p.department_id, limit: p.limit });
+        return { success: true, count: emps.length, employees: emps.map(e => ({ id: e['id'], name: e['name'], department: e['department_id'], job: e['job_id'], email: e['work_email'], phone: e['mobile_phone'], manager: e['parent_id'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leaves',
+    description: '查看请假记录。用于"我的请假记录"、"查看某人的请假"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '员工ID，不填则查当前用户' },
+        state:       { type: 'string', enum: ['draft','confirm','validate1','validate','refuse'], description: '状态筛选' },
+        limit:       { type: 'number', description: '上限，默认20' },
+      },
+    },
+    async handler(p: { employee_id?: number; state?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const leaves = await client.getLeaves({ employee_id: p.employee_id, state: p.state, limit: p.limit });
+        return { success: true, count: leaves.length, leaves: leaves.map(l => ({ id: l['id'], name: l['name'], employee: l['employee_id'], type: l['holiday_status_id'], from: l['date_from'], to: l['date_to'], days: l['number_of_days'], state: l['state'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_attendances',
+    description: '查看考勤打卡记录。用于"我的考勤"、"打卡记录"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '员工ID，不填则查当前用户' },
+        limit:       { type: 'number', description: '上限，默认20' },
+      },
+    },
+    async handler(p: { employee_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getAttendances({ employee_id: p.employee_id, limit: p.limit });
+        return { success: true, count: records.length, attendances: records.map(a => ({ id: a['id'], employee: a['employee_id'], check_in: a['check_in'], check_out: a['check_out'], worked_hours: a['worked_hours'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
+  // 审批（v1.2 新增）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_approvals',
+    description: '查看审批请求列表。用于"我的审批"、"待审批的"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        my_requests: { type: 'boolean', description: '只看我提交的请求' },
+        state:       { type: 'string', enum: ['new','pending','approved','refused','cancel'], description: '状态筛选' },
+        limit:       { type: 'number', description: '上限，默认20' },
+      },
+    },
+    async handler(p: { my_requests?: boolean; state?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const approvals = await client.getApprovals({ my_requests: p.my_requests, state: p.state, limit: p.limit });
+        return { success: true, count: approvals.length, approvals: approvals.map(a => ({ id: a['id'], name: a['name'], category: a['category_id'], owner: a['request_owner_id'], status: a['request_status'], date: a['date'], amount: a['amount'], reason: a['reason'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 实施经理每日概况
   // ══════════════════════════════════════════════════════
 
@@ -737,7 +958,7 @@ function registerTools(api: OpenClawPluginApi) {
         const total = briefing.todayTasks.length + briefing.overdueActivities.length + briefing.openTickets.length;
         return {
           success: true,
-          message: `📅 ${todayStr} 概况：${total} 项核心待处理`,
+          message: `${todayStr} 概况：${total} 项核心待处理`,
           briefing: {
             date: todayStr,
             today_tasks: { count: briefing.todayTasks.length, items: briefing.todayTasks.map(t => ({ id: t['id'], name: t['name'], project: t['project_id'], deadline: t['date_deadline'], priority: t['priority'] })) },
@@ -752,33 +973,39 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 23 个工具已注册');
+  api.logger.info('[odoo] 32 个工具已注册');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
 function registerHooks(api: OpenClawPluginApi) {
-  api.on('before_prompt_build', (_event: unknown, ctx: unknown) => {
+  api.on('before_prompt_build', async (_event: unknown, ctx: unknown) => {
     const aid = (ctx as { agentId?: string } | undefined)?.agentId?.trim() ?? 'default';
-    const client = odooClients.get(aid);
     const todayStr = today();
     const tomorrowStr = tomorrow();
+
+    // 尝试从持久化恢复连接（per-agent）
+    let client = odooClients.get(aid);
+    if (!client?.isAuthenticated()) {
+      client = await tryRestoreAgent(api, aid) ?? undefined;
+    }
 
     if (!client?.isAuthenticated()) {
       return {
         appendSystemContext: `
 ## 辉火云·欧度（Odoo 19）插件 — 未连接
 
-插件已加载但尚未连接到 Odoo。当用户提到任何 ERP/Odoo 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时等），你必须：
+插件已加载但当前用户（agent: ${aid}）尚未连接到 Odoo。当用户提到任何 ERP/Odoo 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你必须：
 
 1. 告诉用户需要先连接辉火云·欧度
 2. 依次询问以下信息：
-   - **系统地址**（URL）：例如 https://www.huo15.com
+   - **公司系统地址**（URL）：例如 https://www.huo15.com
    - **用户名**（邮箱或登录名）
    - **密码**
 3. **数据库名不需要主动询问** — odoo_connect 会自动检测。如果只有一个数据库会自动连接；如果有多个数据库，工具会返回列表，届时再让用户选择。
 4. 收集到 URL、用户名、密码后，立即调用 **odoo_connect**（不传 db 参数）
+5. 连接成功后凭据会自动保存，下次使用无需重新输入
 
-示例引导话术："要操作辉火云·欧度，需要先连接。请提供您的 Odoo 系统地址、用户名和密码。"`.trim(),
+示例引导话术："要使用辉火云·欧度，需要先连接您公司的系统。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
       };
     }
 
@@ -787,12 +1014,12 @@ function registerHooks(api: OpenClawPluginApi) {
       appendSystemContext: `
 ## 辉火云·欧度（Odoo 19）已连接
 
-**用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url}
+**用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
 
-### 工具速查（共 23 个）
+### 工具速查（共 32 个）
 
-**基础**：odoo_connect · odoo_status
+**基础**：odoo_connect · odoo_status · odoo_disconnect
 **任务**：odoo_create_task · odoo_list_tasks · odoo_update_task
 **活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_create_event
 **消息**：odoo_get_messages · odoo_send_message
@@ -802,7 +1029,11 @@ function registerHooks(api: OpenClawPluginApi) {
 **销售**：odoo_sale_orders · odoo_purchase_orders
 **客服**：odoo_tickets · odoo_ticket_create
 **财务**：odoo_invoices
-**助手**：⭐ odoo_daily_briefing
+**联系人**：odoo_contacts · odoo_contact_create
+**库存**：odoo_stock_levels · odoo_stock_pickings
+**HR** ：odoo_employees · odoo_leaves · odoo_attendances
+**审批**：odoo_approvals
+**助手**：odoo_daily_briefing
 
 ### 自然语言 → 工具映射（直接调用，无需询问）
 
@@ -825,21 +1056,28 @@ function registerHooks(api: OpenClawPluginApi) {
 | 查发票 / 逾期应收 | **odoo_invoices**(overdue_only=true) |
 | 查销售订单 | **odoo_sale_orders** |
 | 查采购订单 | **odoo_purchase_orders** |
+| 查客户 / 找联系人 | **odoo_contacts** |
+| 添加新客户 | **odoo_contact_create** |
+| 查库存 / 产品还有多少 | **odoo_stock_levels** |
+| 调拨单 / 出入库 | **odoo_stock_pickings** |
+| 查员工 / 某部门有谁 | **odoo_employees** |
+| 请假记录 | **odoo_leaves** |
+| 考勤 / 打卡 | **odoo_attendances** |
+| 审批 / 待审批 | **odoo_approvals** |
 | 查看消息 / 邮件通知 | **odoo_get_messages** |
-| 查客户 | **odoo_search**(model="res.partner") |
-| 查库存 | **odoo_search**(model="stock.quant") |
-| 查员工 | **odoo_search**(model="hr.employee") |
 | 查活动类型 | **odoo_activity_types** |
+| 断开连接 / 退出系统 | **odoo_disconnect** |
 
 ### Odoo 常用模型
 project.task · project.project · project.milestone · mail.activity · calendar.event ·
 crm.lead · crm.stage · sale.order · purchase.order · helpdesk.ticket · account.move ·
-res.partner · hr.employee · stock.quant · account.analytic.line
+res.partner · hr.employee · hr.leave · hr.attendance · stock.quant · stock.picking ·
+account.analytic.line · approval.request · planning.slot
 
 ### 日期 & 字段规范
 - date 字段：YYYY-MM-DD，今天=${todayStr}，明天=${tomorrowStr}
 - datetime 字段：YYYY-MM-DD HH:MM:SS，默认上午 09:00:00，下午 14:00:00
-- 优先级：0=普通 1=中 2=高 3=紧急
+- 优先级：0=普通 1=中 2高 3=紧急
 - Many2one 读取返回 [id, "名称"]，写入时传数字 id
 - 商机阶段可通过 odoo_search(model="crm.stage") 查询
 - 活动类型可通过 odoo_activity_types 查询
@@ -847,7 +1085,7 @@ res.partner · hr.employee · stock.quant · account.analytic.line
     };
   });
 
-  api.logger.info('[odoo] before_prompt_build 钩子已注册');
+  api.logger.info('[odoo] before_prompt_build 钩子已注册（per-agent 隔离）');
 }
 
 // ── 处理 Odoo 更新通知 ────────────────────────────────────────────────────────
@@ -856,11 +1094,11 @@ function handleOdooUpdates(api: OpenClawPluginApi, updates: SyncUpdate[], aid: s
     let title = '', body = '';
     const d = update.data as Record<string, unknown>;
     switch (update.type) {
-      case 'todo':     title = update.action === 'create' ? '📋 新待办' : '📋 待办更新'; body = String(d['name'] ?? ''); break;
-      case 'activity': title = '⏰ 活动到期'; body = String(d['summary'] ?? '新活动'); break;
-      case 'message':  title = '💬 新消息'; body = String(d['subject'] ?? '无主题'); break;
-      case 'email':    title = '📧 新邮件通知'; body = `通知 ID: ${update.id}`; break;
-      case 'calendar': title = update.action === 'create' ? '📅 新日历事件' : '📅 日历更新'; body = String(d['name'] ?? ''); break;
+      case 'todo':     title = update.action === 'create' ? '新待办' : '待办更新'; body = String(d['name'] ?? ''); break;
+      case 'activity': title = '活动到期'; body = String(d['summary'] ?? '新活动'); break;
+      case 'message':  title = '新消息'; body = String(d['subject'] ?? '无主题'); break;
+      case 'email':    title = '新邮件通知'; body = `通知 ID: ${update.id}`; break;
+      case 'calendar': title = update.action === 'create' ? '新日历事件' : '日历更新'; body = String(d['name'] ?? ''); break;
     }
     if (title && body) {
       (api as unknown as Record<string, unknown>)['sendNotification']?.({

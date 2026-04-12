@@ -366,14 +366,112 @@ export class OdooClient {
     return result.records;
   }
 
+  // ==================== 联系人 / 客户 ====================
+
+  async getPartners(options: {
+    limit?: number; is_company?: boolean; customer_rank?: boolean;
+    supplier_rank?: boolean; keyword?: string;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (options.is_company !== undefined) domain.push(['is_company', '=', options.is_company]);
+    if (options.customer_rank) domain.push(['customer_rank', '>', 0]);
+    if (options.supplier_rank) domain.push(['supplier_rank', '>', 0]);
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    const result = await this.searchRead('res.partner', domain,
+      ['id', 'name', 'email', 'phone', 'mobile', 'is_company', 'city', 'country_id', 'customer_rank', 'supplier_rank', 'parent_id'],
+      { limit: options.limit ?? 30, order: 'name asc' });
+    return result.records;
+  }
+
+  async createPartner(values: {
+    name: string; email?: string; phone?: string; mobile?: string;
+    is_company?: boolean; city?: string; street?: string;
+    customer_rank?: number; supplier_rank?: number; parent_id?: number;
+  }): Promise<number> {
+    return this.create('res.partner', {
+      name: values.name,
+      email: values.email || false,
+      phone: values.phone || false,
+      mobile: values.mobile || false,
+      is_company: values.is_company ?? false,
+      city: values.city || false,
+      street: values.street || false,
+      customer_rank: values.customer_rank ?? 1,
+      supplier_rank: values.supplier_rank ?? 0,
+      parent_id: values.parent_id || false,
+    });
+  }
+
+  // ==================== 库存 ====================
+
+  async getStockLevels(options: {
+    limit?: number; product_id?: number; location_id?: number; keyword?: string;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['quantity', '>', 0]];
+    if (options.product_id) domain.push(['product_id', '=', options.product_id]);
+    if (options.location_id) domain.push(['location_id', '=', options.location_id]);
+    if (options.keyword) domain.push(['product_id.name', 'ilike', options.keyword]);
+    const result = await this.searchRead('stock.quant', domain,
+      ['id', 'product_id', 'location_id', 'lot_id', 'quantity', 'reserved_quantity', 'available_quantity'],
+      { limit: options.limit ?? 50, order: 'product_id asc' });
+    return result.records;
+  }
+
+  async getStockPickings(options: {
+    limit?: number; state?: string; picking_type?: string;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    else domain.push(['state', 'not in', ['done', 'cancel']]);
+    if (options.picking_type) domain.push(['picking_type_code', '=', options.picking_type]);
+    const result = await this.searchRead('stock.picking', domain,
+      ['id', 'name', 'partner_id', 'picking_type_id', 'state', 'scheduled_date', 'date_done', 'origin'],
+      { limit: options.limit ?? 20, order: 'scheduled_date asc' });
+    return result.records;
+  }
+
   // ==================== HR ====================
 
-  async getEmployees(options: { limit?: number; department_id?: number; active?: boolean } = {}): Promise<OdooRecord[]> {
+  async getEmployees(options: { limit?: number; department_id?: number; active?: boolean; keyword?: string } = {}): Promise<OdooRecord[]> {
     const domain: Domain = [['active', '=', options.active !== false]];
     if (options.department_id) domain.push(['department_id', '=', options.department_id]);
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
     const result = await this.searchRead('hr.employee', domain,
       ['id', 'name', 'department_id', 'job_id', 'work_email', 'mobile_phone', 'parent_id', 'user_id'],
-      { limit: options.limit ?? 50 });
+      { limit: options.limit ?? 50, order: 'name asc' });
+    return result.records;
+  }
+
+  async getLeaves(options: { limit?: number; state?: string; employee_id?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    const result = await this.searchRead('hr.leave', domain,
+      ['id', 'name', 'employee_id', 'holiday_status_id', 'date_from', 'date_to', 'number_of_days', 'state'],
+      { limit: options.limit ?? 20, order: 'date_from desc' });
+    return result.records;
+  }
+
+  async getAttendances(options: { limit?: number; employee_id?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    const result = await this.searchRead('hr.attendance', domain,
+      ['id', 'employee_id', 'check_in', 'check_out', 'worked_hours'],
+      { limit: options.limit ?? 20, order: 'check_in desc' });
+    return result.records;
+  }
+
+  // ==================== 审批 ====================
+
+  async getApprovals(options: { limit?: number; state?: string; my_requests?: boolean } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['request_status', '=', options.state]);
+    if (options.my_requests) domain.push(['request_owner_id.user_id', '=', this.uid ?? 0]);
+    const result = await this.searchRead('approval.request', domain,
+      ['id', 'name', 'category_id', 'request_owner_id', 'request_status', 'date', 'date_confirmed', 'amount', 'reason'],
+      { limit: options.limit ?? 20, order: 'date desc' });
     return result.records;
   }
 

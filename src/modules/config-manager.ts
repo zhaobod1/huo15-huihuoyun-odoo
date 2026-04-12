@@ -1,46 +1,61 @@
 /**
- * Odoo 插件配置管理器
+ * Odoo 插件配置管理器 — v2 (per-agent 隔离)
  *
- * 负责 Odoo 连接配置的持久化存储与加载。
- * 当用户通过对话（odoo_connect 工具）提供连接信息时，将配置持久化到本地文件系统，
- * 下次启动时自动恢复连接，无需重新输入凭据。
+ * 每个 agent（WeCom 动态 agent 的每个用户/群组）拥有独立的 Odoo 凭据。
+ * 存储路径: ~/.openclaw/plugin-configs/odoo/{agentId}.json
+ *
+ * 向下兼容：如果存在旧的单文件 odoo-config.json，作为 'default' agent 的配置。
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { OdooPluginConfig, OdooConfig } from '../types/index.js';
 
-const CONFIG_DIR = '.openclaw/plugin-configs';
-const CONFIG_FILE = 'odoo-config.json';
+const CONFIG_BASE = '.openclaw/plugin-configs/odoo';
+const LEGACY_FILE = '.openclaw/plugin-configs/odoo-config.json';
+
+function sanitizeAgentId(agentId: string): string {
+  return agentId.replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 128) || 'default';
+}
 
 export class ConfigManager {
-  private configPath: string;
+  private baseDir: string;
+  private legacyPath: string;
 
   constructor(homeDir: string = process.env['HOME'] ?? '/root') {
-    this.configPath = join(homeDir, CONFIG_DIR, CONFIG_FILE);
+    this.baseDir = join(homeDir, CONFIG_BASE);
+    this.legacyPath = join(homeDir, LEGACY_FILE);
   }
 
-  /** 加载持久化配置 */
-  load(): OdooPluginConfig | null {
+  /** 获取 agent 配置文件路径 */
+  private agentPath(agentId: string): string {
+    return join(this.baseDir, `${sanitizeAgentId(agentId)}.json`);
+  }
+
+  /** 加载指定 agent 的配置（带 legacy 回退） */
+  load(agentId: string = 'default'): OdooPluginConfig | null {
     try {
-      if (!existsSync(this.configPath)) {
-        return null;
+      const path = this.agentPath(agentId);
+      if (existsSync(path)) {
+        return JSON.parse(readFileSync(path, 'utf-8')) as OdooPluginConfig;
       }
-      const data = readFileSync(this.configPath, 'utf-8');
-      return JSON.parse(data) as OdooPluginConfig;
+      // legacy 回退：default agent 读旧文件
+      if (agentId === 'default' && existsSync(this.legacyPath)) {
+        return JSON.parse(readFileSync(this.legacyPath, 'utf-8')) as OdooPluginConfig;
+      }
+      return null;
     } catch {
       return null;
     }
   }
 
-  /** 持久化保存完整配置 */
-  save(config: OdooPluginConfig): boolean {
+  /** 保存指定 agent 的完整配置 */
+  save(config: OdooPluginConfig, agentId: string = 'default'): boolean {
     try {
-      const dir = dirname(this.configPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
+      if (!existsSync(this.baseDir)) {
+        mkdirSync(this.baseDir, { recursive: true });
       }
-      writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
+      writeFileSync(this.agentPath(agentId), JSON.stringify(config, null, 2), 'utf-8');
       return true;
     } catch {
       return false;
@@ -48,21 +63,32 @@ export class ConfigManager {
   }
 
   /** 保存 Odoo 连接配置（合并到现有配置） */
-  saveOdooConfig(odooConfig: OdooConfig): boolean {
-    const config = this.load() ?? {};
+  saveOdooConfig(odooConfig: OdooConfig, agentId: string = 'default'): boolean {
+    const config = this.load(agentId) ?? {};
     config.odoo = odooConfig;
-    return this.save(config);
+    return this.save(config, agentId);
   }
 
-  /** 清除持久化配置文件 */
-  clear(): boolean {
+  /** 清除指定 agent 的配置 */
+  clear(agentId: string = 'default'): boolean {
     try {
-      if (existsSync(this.configPath)) {
-        unlinkSync(this.configPath);
-      }
+      const path = this.agentPath(agentId);
+      if (existsSync(path)) unlinkSync(path);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** 列出所有已保存配置的 agentId */
+  listAgents(): string[] {
+    try {
+      if (!existsSync(this.baseDir)) return [];
+      return readdirSync(this.baseDir)
+        .filter(f => f.endsWith('.json'))
+        .map(f => f.replace(/\.json$/, ''));
+    } catch {
+      return [];
     }
   }
 }
