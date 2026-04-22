@@ -587,6 +587,133 @@ export class OdooClient {
     return result.records;
   }
 
+  // ==================== Knowledge（知识库 / knowledge.article）====================
+  //
+  // Odoo 19 Enterprise 的 `knowledge.article` 模型要点：
+  //  - body 字段是 HTML
+  //  - category 由 internal_permission 计算得出：
+  //      internal_permission='write' → workspace，='none' → private（无 parent 时）
+  //      子文章不需要 internal_permission，权限沿 parent 继承
+  //  - DB 约束：顶层文章必须给 internal_permission；子文章必须给 parent_id
+  //  - 通过 action_toggle_favorite / action_send_to_trash / move_to 等 action 操作
+  //  - is_user_favorite 是 compute + search，不能直接 write
+
+  async searchKnowledgeArticles(options: {
+    keyword?: string;
+    category?: 'workspace' | 'private' | 'shared';
+    only_favorite?: boolean;
+    only_roots?: boolean;         // 只列顶层文章
+    parent_id?: number;           // 列某文章的直接子节点
+    limit?: number;
+    include_trashed?: boolean;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (!options.include_trashed) domain.push(['to_delete', '=', false]);
+    domain.push(['active', '=', true]);
+    if (options.category) domain.push(['category', '=', options.category]);
+    if (options.only_favorite) domain.push(['is_user_favorite', '=', true]);
+    if (options.only_roots) domain.push(['parent_id', '=', false]);
+    if (options.parent_id !== undefined) domain.push(['parent_id', '=', options.parent_id]);
+    if (options.keyword) {
+      domain.push('|', ['name', 'ilike', options.keyword], ['body', 'ilike', options.keyword]);
+    }
+    const result = await this.searchRead('knowledge.article', domain,
+      ['id', 'name', 'icon', 'parent_id', 'root_article_id', 'category',
+       'is_user_favorite', 'favorite_count', 'last_edition_date', 'last_edition_uid',
+       'has_article_children', 'sequence'],
+      { limit: options.limit ?? 30, order: 'sequence asc, last_edition_date desc, id desc' });
+    return result.records;
+  }
+
+  /** 读取单篇文章完整内容（含 body） */
+  async readKnowledgeArticle(id: number): Promise<OdooRecord | null> {
+    const records = await this.read('knowledge.article', [id],
+      ['id', 'name', 'icon', 'body', 'parent_id', 'root_article_id', 'category',
+       'internal_permission', 'inherited_permission',
+       'is_user_favorite', 'favorite_count', 'is_locked', 'to_delete',
+       'last_edition_date', 'last_edition_uid', 'sequence', 'has_article_children']);
+    return records[0] ?? null;
+  }
+
+  /**
+   * 创建知识库文章
+   *
+   * - 顶层：必须传 category='workspace'|'private'；自动映射到 internal_permission
+   *     workspace → 'write'  （默认所有内部用户可编辑）
+   *     private   → 'none'   （仅所有者）
+   *     shared    → 'none'（通常通过加 member 实现）
+   * - 子文章：传 parent_id，其余权限继承
+   */
+  async createKnowledgeArticle(values: {
+    name?: string;
+    body?: string;                // HTML
+    icon?: string;                // emoji
+    parent_id?: number;
+    category?: 'workspace' | 'private' | 'shared';
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      name: values.name || '未命名',
+      body: values.body ?? false,
+      icon: values.icon || false,
+    };
+    if (values.parent_id) {
+      payload['parent_id'] = values.parent_id;
+    } else {
+      const cat = values.category ?? 'private';
+      payload['internal_permission'] = cat === 'workspace' ? 'write' : 'none';
+      if (cat === 'workspace') payload['is_article_visible_by_everyone'] = true;
+    }
+    return this.create('knowledge.article', payload);
+  }
+
+  async updateKnowledgeArticle(id: number, values: {
+    name?: string; body?: string; icon?: string;
+  }): Promise<boolean> {
+    const payload: Record<string, unknown> = {};
+    if (values.name !== undefined) payload['name'] = values.name;
+    if (values.body !== undefined) payload['body'] = values.body;
+    if (values.icon !== undefined) payload['icon'] = values.icon || false;
+    if (Object.keys(payload).length === 0) return true;
+    return this.write('knowledge.article', [id], payload);
+  }
+
+  /**
+   * 在现有文章的 body 末尾追加一段 HTML —— 读-改-写（Odoo body 字段无原子 append）。
+   * 调用者负责把 markdown 之类的输入转成合法 HTML。
+   */
+  async appendKnowledgeArticle(id: number, htmlSuffix: string): Promise<boolean> {
+    const rec = await this.readKnowledgeArticle(id);
+    if (!rec) throw new Error(`文章 ${id} 不存在`);
+    const body = (rec['body'] as string | false) || '';
+    const next = `${body}${htmlSuffix}`;
+    return this.write('knowledge.article', [id], { body: next });
+  }
+
+  /** 移动到新 parent 或在兄弟节点中排序 */
+  async moveKnowledgeArticle(id: number, options: {
+    parent_id?: number | false;
+    before_article_id?: number;
+    category?: 'workspace' | 'private' | 'shared';
+  }): Promise<unknown> {
+    return this.call('knowledge.article', 'move_to', [[id]], {
+      parent_id: options.parent_id ?? false,
+      before_article_id: options.before_article_id ?? false,
+      category: options.category ?? false,
+    });
+  }
+
+  async toggleKnowledgeFavorite(id: number): Promise<unknown> {
+    return this.call('knowledge.article', 'action_toggle_favorite', [[id]]);
+  }
+
+  async trashKnowledgeArticle(id: number): Promise<unknown> {
+    return this.call('knowledge.article', 'action_send_to_trash', [[id]]);
+  }
+
+  async restoreKnowledgeArticle(id: number): Promise<unknown> {
+    return this.call('knowledge.article', 'action_unarchive', [[id]]);
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

@@ -1,32 +1,19 @@
 /**
- * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.2
+ * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.3
  *
- * v1.2 新增：
+ * v1.3 新增：
+ * - 跨渠道通知基座（NotificationBus）：Odoo 消息/活动/待办统一封装成
+ *   NotificationEnvelope，发布到全局 bus；企微、钉钉、飞书、webhook 等
+ *   任意渠道插件只需 subscribe 或 registerTransport 即可接收，本插件
+ *   无需事先知道具体渠道。
+ * - 新增工具：odoo_notification_status / odoo_notification_channels /
+ *   odoo_notification_test
+ *
+ * v1.2：
  * - 每个 WeCom 动态 agent 用户独立的 Odoo 凭据存储
  * - 首次使用自动引导输入系统地址、用户名、密码
  * - 数据库自动检测（单库自动连接，多库让用户选择）
- * - 联系人/客户管理（查询、创建）
- * - 库存查询（库存量、调拨单）
- * - HR 员工查询、考勤、请假
- * - 审批流查询
- *
- * 工具清单（共 33 个）：
- * 连接     odoo_connect, odoo_status, odoo_disconnect
- * 任务     odoo_create_task, odoo_list_tasks, odoo_update_task, odoo_get_task_stages
- * 活动     odoo_create_activity, odoo_list_activities, odoo_activity_types
- * 日历     odoo_create_event
- * 消息     odoo_get_messages, odoo_send_message
- * 搜索     odoo_search
- * CRM      odoo_crm_pipeline, odoo_crm_create, odoo_crm_update, odoo_crm_won, odoo_crm_lost
- * 项目     odoo_project_overview, odoo_timesheet_log
- * 销售     odoo_sale_orders, odoo_purchase_orders
- * 客服     odoo_tickets, odoo_ticket_create
- * 财务     odoo_invoices
- * 联系人   odoo_contacts, odoo_contact_create
- * 库存     odoo_stock_levels, odoo_stock_pickings
- * HR       odoo_employees, odoo_leaves, odoo_attendances
- * 审批     odoo_approvals
- * 助手     odoo_daily_briefing
+ * - 联系人/客户管理、库存查询、HR、审批流
  */
 
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
@@ -34,12 +21,28 @@ import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { OdooClient } from './src/modules/odoo-client.js';
 import { NotificationPoller } from './src/modules/notification-poller.js';
 import { ConfigManager } from './src/modules/config-manager.js';
-import type { OdooPluginConfig, SyncUpdate } from './src/types/index.js';
+import { notificationBus } from './src/modules/notification-bus.js';
+import { toEnvelope } from './src/modules/notification-router.js';
+import { PrefsManager, shouldDeliver, DEFAULT_PREFS } from './src/modules/notification-prefs.js';
+import { EnvelopeCache } from './src/modules/envelope-cache.js';
+import { mdToHtml } from './src/utils/md-to-html.js';
+import type {
+  OdooPluginConfig,
+  SyncUpdate,
+  NotificationEnvelope,
+  NotificationPreferences,
+  NotificationKind,
+  NotificationPriority,
+  InboundReply,
+} from './src/types/index.js';
 import { today, tomorrow } from './src/utils/date-utils.js';
 
 const odooClients = new Map<string, OdooClient>();
 const pollers = new Map<string, NotificationPoller>();
 const configManager = new ConfigManager();
+const prefsManager = new PrefsManager();
+const envelopeCache = new EnvelopeCache();
+let replyUnsubscribe: (() => void) | null = null;
 
 export default definePluginEntry({
   id: 'odoo',
@@ -50,9 +53,32 @@ export default definePluginEntry({
     // 不在启动时全局连接。每个 agent 的连接在 before_prompt_build 或 odoo_connect 时按需恢复。
     registerTools(api);
     registerHooks(api);
-    api.logger.info('[odoo] 插件 v1.2 已加载（per-agent 隔离模式）');
+
+    // 订阅入站回复 —— 渠道收到用户回复后调用 bus.reply()，这里把文字写回 Odoo chatter
+    replyUnsubscribe?.();
+    replyUnsubscribe = notificationBus.onReply(async (reply) => {
+      await handleInboundReply(api, reply);
+    });
+
+    api.logger.info('[odoo] 插件 v1.4 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复）');
   },
 });
+
+// ── 公共 API：供企微 / 钉钉 / 飞书等渠道插件作为依赖引入 ────────────────────
+// 方式 A（推荐）：
+//   import { notificationBus } from '@huo15/huo15-huihuoyun-odoo';
+//   notificationBus.subscribe(env => { ... });
+// 方式 B（无依赖解耦）：
+//   const bus = (globalThis as any)[Symbol.for('openclaw.huo15.notification-bus.v1')];
+export { notificationBus } from './src/modules/notification-bus.js';
+export type {
+  NotificationEnvelope,
+  NotificationKind,
+  NotificationPriority,
+  ChannelTarget,
+  ChannelTransport,
+  DeliveryResult,
+} from './src/types/index.js';
 
 // ── 初始化客户端（per-agent）─────────────────────────────────────────────────
 async function initOdooClient(
@@ -995,7 +1021,434 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 32 个工具已注册');
+  // ══════════════════════════════════════════════════════
+  // 通知基座（跨渠道）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_notification_status',
+    description: '查看 Odoo 通知总线状态：已注册的渠道 transport、订阅者数、最近一次 poll 时间、当前 agent 的偏好设置、信封溯源缓存大小。用于"通知推送情况"、"企微/钉钉有没有连上"等排查类问题。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const aid = getAgentId(ctx);
+      const pollerStatus = pollers.get(aid)?.getStatus() ?? null;
+      const prefs = prefsManager.load(aid);
+      return {
+        success: true,
+        agentId: aid,
+        bus: {
+          subscribers: notificationBus.subscriberCount(),
+          replySubscribers: notificationBus.replySubscriberCount(),
+          transports: notificationBus.listTransports(),
+        },
+        poller: pollerStatus,
+        prefs,
+        cache: { envelopesTracked: envelopeCache.size() },
+        hint: notificationBus.subscriberCount() === 0 && notificationBus.listTransports().length === 0
+          ? '当前没有任何渠道插件订阅通知总线。请确认已加载企微/钉钉等插件，或检查它们的连接状态。'
+          : undefined,
+      };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_notification_channels',
+    description: '列出当前已注册到通知总线的渠道（如企微、钉钉、飞书、webhook）。仅作为信息查询，真正的连接由各渠道插件自己管理。',
+    schema: { type: 'object', properties: {} },
+    async handler() {
+      const transports = notificationBus.listTransports();
+      return {
+        success: true,
+        count: transports.length,
+        channels: transports,
+        subscribers: notificationBus.subscriberCount(),
+      };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_notification_test',
+    description: '向通知总线发一条测试 envelope，验证企微/钉钉等渠道是否能收到。用于"测试一下通知"、"看看推送通不通"等。',
+    schema: {
+      type: 'object',
+      properties: {
+        title:   { type: 'string', description: '测试标题，默认"辉火云·欧度测试通知"' },
+        summary: { type: 'string', description: '测试摘要，默认"这是一条由 odoo 插件发送的测试通知"' },
+      },
+    },
+    async handler(p: { title?: string; summary?: string }, ctx: Record<string, unknown>) {
+      const aid = getAgentId(ctx);
+      const client = odooClients.get(aid);
+      const odooUrl = client?.getSessionInfo().url;
+      const envelope: NotificationEnvelope = {
+        id: `odoo:${aid}:test:${Date.now()}`,
+        source: 'odoo',
+        agentId: aid,
+        kind: 'message',
+        action: 'test',
+        priority: 'low',
+        title: p.title ?? '辉火云·欧度测试通知',
+        summary: p.summary ?? '这是一条由 odoo 插件发送的测试通知',
+        body: p.summary ?? '如果你在企微 / 钉钉 / 飞书 里看到这条，说明渠道接通正常。',
+        tags: ['odoo', 'test'],
+        createdAt: Date.now(),
+        origin: { url: odooUrl, model: 'test', resId: 0 },
+      };
+      await notificationBus.publish(envelope);
+      return {
+        success: true,
+        dispatched: true,
+        subscribers: notificationBus.subscriberCount(),
+        transports: notificationBus.listTransports().map(t => t.name),
+        envelopeId: envelope.id,
+        message: notificationBus.subscriberCount() === 0
+          ? '已发送，但当前总线没有订阅者 —— 渠道插件可能未加载。'
+          : `已发送到 ${notificationBus.subscriberCount()} 个订阅者。`,
+      };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_notification_prefs',
+    description: '查看或更新当前用户的通知偏好。支持：启停总开关、只接收某些类型（todo/activity/message/email/calendar）、优先级下限、静音时段（24h 制，跨午夜 OK）。不传任何参数只做查询。urgent 级别永远绕过静音与优先级过滤。',
+    schema: {
+      type: 'object',
+      properties: {
+        enabled:      { type: 'boolean', description: '通知总开关，false=完全停掉' },
+        kinds:        { type: 'array', items: { type: 'string', enum: ['todo','activity','message','email','calendar'] }, description: '允许发的种类，空数组=全开' },
+        min_priority: { type: 'string', enum: ['low','normal','high','urgent'], description: '优先级下限，低于此级别的被丢弃（urgent 永远放行）' },
+        quiet_start:  { type: 'string', description: '静音起始 HH:MM（传空字符串 "" 清除静音）' },
+        quiet_end:    { type: 'string', description: '静音结束 HH:MM' },
+        reset:        { type: 'boolean', description: 'true=重置为默认偏好' },
+      },
+    },
+    async handler(
+      p: { enabled?: boolean; kinds?: string[]; min_priority?: string; quiet_start?: string; quiet_end?: string; reset?: boolean },
+      ctx: Record<string, unknown>,
+    ) {
+      const aid = getAgentId(ctx);
+      if (p.reset) {
+        prefsManager.clear(aid);
+        return { success: true, agentId: aid, prefs: DEFAULT_PREFS, message: '偏好已重置为默认。' };
+      }
+
+      const current = prefsManager.load(aid);
+      const patch: Partial<NotificationPreferences> = {};
+      if (p.enabled !== undefined) patch.enabled = p.enabled;
+      if (Array.isArray(p.kinds)) patch.kinds = p.kinds as NotificationKind[];
+      if (p.min_priority) patch.minPriority = p.min_priority as NotificationPriority;
+      if (p.quiet_start === '' || p.quiet_end === '') {
+        patch.quietHours = undefined;
+      } else if (p.quiet_start && p.quiet_end) {
+        patch.quietHours = { start: p.quiet_start, end: p.quiet_end };
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return { success: true, agentId: aid, prefs: current, message: '当前偏好（未变更）' };
+      }
+      const updated = prefsManager.patch(patch, aid);
+      return { success: true, agentId: aid, prefs: updated, message: '通知偏好已更新' };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_notification_reply',
+    description: '手动模拟一次从渠道回到 Odoo 的入站回复 —— 渠道插件在收到用户回复后应调用这条逻辑（或直接 import notificationBus.reply）。给出 envelope_id + body，Odoo 会在对应记录的 chatter 里写一条消息。用于排查"企微回复能不能写回 Odoo"。',
+    schema: {
+      type: 'object',
+      properties: {
+        envelope_id: { type: 'string', description: '被回复的 envelope id（从 odoo_notification_test 或实际通知里取）' },
+        body:        { type: 'string', description: '回复正文（纯文本）' },
+        channel:     { type: 'string', description: '渠道标识，默认 "manual"' },
+        from_user:   { type: 'string', description: '回复人标识，可选' },
+      },
+      required: ['envelope_id', 'body'],
+    },
+    async handler(p: { envelope_id: string; body: string; channel?: string; from_user?: string }) {
+      const reply: InboundReply = {
+        envelopeId: p.envelope_id,
+        channel: p.channel ?? 'manual',
+        fromUser: p.from_user,
+        body: p.body,
+      };
+      const result = await notificationBus.reply(reply);
+      return { success: result.ok, handled: result.handled, errors: result.errors, message: result.ok ? `回复已分发给 ${result.handled} 个处理器。` : '回复未能成功投递，请检查 Odoo 是否连接、envelope_id 是否在缓存中（24h 内、500 条上限）。' };
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
+  // 知识库（knowledge.article）
+  // ══════════════════════════════════════════════════════
+
+  api.registerTool({
+    name: 'odoo_knowledge_search',
+    description: '搜索 Odoo 知识库文章。支持关键词（匹配标题或正文）、分类（workspace/private/shared）、仅收藏、仅顶层、指定父文章。用于"找一下关于 X 的知识库文章"、"列出我收藏的"、"列出工作区顶层文章"。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:         { type: 'string', description: '关键词，匹配文章标题或正文' },
+        category:        { type: 'string', enum: ['workspace','private','shared'], description: '分类：workspace=工作区/private=私有/shared=共享' },
+        only_favorite:   { type: 'boolean', description: '只列我收藏的' },
+        only_roots:      { type: 'boolean', description: '只列顶层文章（parent_id=空）' },
+        parent_id:       { type: 'number', description: '指定父文章 id，列其直接子节点' },
+        include_trashed: { type: 'boolean', description: '包含回收站中的文章，默认 false' },
+        limit:           { type: 'number', description: '上限，默认 30' },
+      },
+    },
+    async handler(
+      p: { keyword?: string; category?: 'workspace'|'private'|'shared'; only_favorite?: boolean; only_roots?: boolean; parent_id?: number; include_trashed?: boolean; limit?: number },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const recs = await client.searchKnowledgeArticles(p);
+        return {
+          success: true,
+          count: recs.length,
+          articles: recs.map(r => ({
+            id: r['id'],
+            name: r['name'],
+            icon: r['icon'] || null,
+            category: r['category'],
+            parent: r['parent_id'],
+            root: r['root_article_id'],
+            has_children: r['has_article_children'],
+            is_favorite: r['is_user_favorite'],
+            favorite_count: r['favorite_count'],
+            last_edition: r['last_edition_date'],
+          })),
+        };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_read',
+    description: '读取单篇知识库文章的完整正文（HTML）。用于"把这篇文章读给我"、"X 文章里写了什么"。body 可能较长，渲染时建议截断。',
+    schema: {
+      type: 'object',
+      properties: {
+        id:        { type: 'number', description: '文章 id（必填）' },
+        plain:     { type: 'boolean', description: 'true=同时返回纯文本摘要（去 HTML）' },
+        max_chars: { type: 'number', description: '正文最大字符数，0=不截断，默认 5000' },
+      },
+      required: ['id'],
+    },
+    async handler(p: { id: number; plain?: boolean; max_chars?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const rec = await client.readKnowledgeArticle(p.id);
+        if (!rec) return { success: false, message: `文章 #${p.id} 不存在` };
+        const maxChars = p.max_chars ?? 5000;
+        const body = String(rec['body'] ?? '');
+        const bodyOut = maxChars > 0 && body.length > maxChars ? body.substring(0, maxChars) + '…' : body;
+        const result: Record<string, unknown> = {
+          success: true,
+          article: {
+            id: rec['id'],
+            name: rec['name'],
+            icon: rec['icon'] || null,
+            category: rec['category'],
+            parent: rec['parent_id'],
+            is_favorite: rec['is_user_favorite'],
+            favorite_count: rec['favorite_count'],
+            is_locked: rec['is_locked'],
+            is_trashed: rec['to_delete'],
+            last_edition: rec['last_edition_date'],
+            internal_permission: rec['internal_permission'],
+            body: bodyOut,
+            body_truncated: bodyOut !== body,
+          },
+        };
+        if (p.plain) {
+          (result['article'] as Record<string, unknown>)['plain'] = stripHtml(body);
+        }
+        return result;
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_create',
+    description: '创建知识库文章。顶层文章必须指定 category（workspace=工作区/private=私有）。子文章传 parent_id，权限继承。body 支持 markdown（自动转 HTML）或直接传 HTML。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:      { type: 'string', description: '文章标题' },
+        body:      { type: 'string', description: '正文（markdown 或 HTML 皆可，检测到 HTML 标签时原样使用）' },
+        icon:      { type: 'string', description: '图标 emoji' },
+        parent_id: { type: 'number', description: '父文章 id（创建子文章时必传）' },
+        category:  { type: 'string', enum: ['workspace','private','shared'], description: '顶层文章的分类，默认 private' },
+      },
+    },
+    async handler(
+      p: { name?: string; body?: string; icon?: string; parent_id?: number; category?: 'workspace'|'private'|'shared' },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const htmlBody = p.body ? mdToHtml(p.body) : '';
+        const id = await client.createKnowledgeArticle({
+          name: p.name,
+          body: htmlBody,
+          icon: p.icon,
+          parent_id: p.parent_id,
+          category: p.category,
+        });
+        return { success: true, articleId: id, message: `已创建文章 #${id}${p.name ? `「${p.name}」` : ''}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_update',
+    description: '更新知识库文章的标题、图标或正文。body 支持 markdown，传 HTML 时原样保留。想追加内容请用 odoo_knowledge_append。',
+    schema: {
+      type: 'object',
+      properties: {
+        id:   { type: 'number', description: '文章 id（必填）' },
+        name: { type: 'string', description: '新标题' },
+        body: { type: 'string', description: '新正文（markdown/HTML），覆盖旧内容' },
+        icon: { type: 'string', description: '新图标 emoji，传空字符串清除' },
+      },
+      required: ['id'],
+    },
+    async handler(p: { id: number; name?: string; body?: string; icon?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.updateKnowledgeArticle(p.id, {
+          name: p.name,
+          body: p.body !== undefined ? mdToHtml(p.body) : undefined,
+          icon: p.icon,
+        });
+        return { success: true, message: `文章 #${p.id} 已更新` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_append',
+    description: '在现有文章末尾追加一段内容（markdown 或 HTML）。适合"把刚才讨论的结论写进 X 文章"这种追加笔记的场景，不会覆盖原有内容。',
+    schema: {
+      type: 'object',
+      properties: {
+        id:      { type: 'number', description: '文章 id（必填）' },
+        content: { type: 'string', description: '要追加的内容（markdown 或 HTML）' },
+        with_divider: { type: 'boolean', description: '是否在追加前插入分隔线 <hr>，默认 false' },
+      },
+      required: ['id', 'content'],
+    },
+    async handler(p: { id: number; content: string; with_divider?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const html = (p.with_divider ? '<hr>' : '') + mdToHtml(p.content);
+        await client.appendKnowledgeArticle(p.id, html);
+        return { success: true, message: `已向文章 #${p.id} 追加 ${p.content.length} 字符` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_tree',
+    description: '展示知识库树结构（以 workspace/private 为根，递归最多 N 层）。用于"给我看下知识库长啥样"、"工作区里都有哪些文章"。',
+    schema: {
+      type: 'object',
+      properties: {
+        category:  { type: 'string', enum: ['workspace','private','shared'], description: '根分类，默认 workspace' },
+        max_depth: { type: 'number', description: '最大深度，默认 3' },
+        max_nodes: { type: 'number', description: '整棵树节点数上限，防爆炸，默认 150' },
+      },
+    },
+    async handler(p: { category?: 'workspace'|'private'|'shared'; max_depth?: number; max_nodes?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      const maxDepth = p.max_depth ?? 3;
+      const maxNodes = p.max_nodes ?? 150;
+      const category = p.category ?? 'workspace';
+      try {
+        type Node = { id: number; name: string; icon: string | null; is_favorite: boolean; children: Node[] };
+        let visited = 0;
+        const walk = async (parentId: number | false, depth: number): Promise<Node[]> => {
+          if (depth > maxDepth || visited >= maxNodes) return [];
+          const items = await client.searchKnowledgeArticles(parentId === false
+            ? { category, only_roots: true, limit: 30 }
+            : { parent_id: parentId as number, limit: 30 });
+          const nodes: Node[] = [];
+          for (const it of items) {
+            if (visited >= maxNodes) break;
+            visited += 1;
+            nodes.push({
+              id: it['id'] as number,
+              name: String(it['name'] ?? ''),
+              icon: (it['icon'] as string) || null,
+              is_favorite: Boolean(it['is_user_favorite']),
+              children: (it['has_article_children'] && depth < maxDepth)
+                ? await walk(it['id'] as number, depth + 1)
+                : [],
+            });
+          }
+          return nodes;
+        };
+        const tree = await walk(false, 0);
+        return { success: true, category, max_depth: maxDepth, nodes_visited: visited, tree };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_favorite',
+    description: '切换知识库文章的收藏状态（已收藏→取消，未收藏→收藏）。用于"收藏这篇"、"取消收藏 X"。',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: '文章 id（必填）' },
+      },
+      required: ['id'],
+    },
+    async handler(p: { id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.toggleKnowledgeFavorite(p.id);
+        // 回读当前状态返回给用户
+        const rec = await client.readKnowledgeArticle(p.id);
+        return { success: true, articleId: p.id, is_favorite: rec?.['is_user_favorite'] ?? null, message: `文章 #${p.id} 收藏状态已切换` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_knowledge_trash',
+    description: '把文章送入回收站（或还原）。默认删除，restore=true 时恢复。Odoo 回收站里的文章在 knowledge_article_trash_limit_days（默认 30 天）后才真正删除，所以是安全操作。',
+    schema: {
+      type: 'object',
+      properties: {
+        id:      { type: 'number',  description: '文章 id（必填）' },
+        restore: { type: 'boolean', description: 'true=从回收站恢复；默认 false（送入回收站）' },
+      },
+      required: ['id'],
+    },
+    async handler(p: { id: number; restore?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        if (p.restore) {
+          await client.restoreKnowledgeArticle(p.id);
+          return { success: true, message: `文章 #${p.id} 已从回收站恢复` };
+        } else {
+          await client.trashKnowledgeArticle(p.id);
+          return { success: true, message: `文章 #${p.id} 已送入回收站（30 天后物理删除）` };
+        }
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.logger.info('[odoo] 48 个工具已注册（含通知基座 + 偏好 + 入站回复 + 知识库）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -1039,10 +1492,10 @@ function registerHooks(api: OpenClawPluginApi) {
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
 
-### 工具速查（共 32 个）
+### 工具速查（共 48 个）
 
 **基础**：odoo_connect · odoo_status · odoo_disconnect
-**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task
+**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages
 **活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_create_event
 **消息**：odoo_get_messages · odoo_send_message
 **搜索**：odoo_search
@@ -1056,6 +1509,8 @@ function registerHooks(api: OpenClawPluginApi) {
 **HR** ：odoo_employees · odoo_leaves · odoo_attendances
 **审批**：odoo_approvals
 **助手**：odoo_daily_briefing
+**通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
+**知识库**：odoo_knowledge_search · odoo_knowledge_read · odoo_knowledge_create · odoo_knowledge_update · odoo_knowledge_append · odoo_knowledge_tree · odoo_knowledge_favorite · odoo_knowledge_trash
 
 ### 自然语言 → 工具映射（直接调用，无需询问）
 
@@ -1088,13 +1543,26 @@ function registerHooks(api: OpenClawPluginApi) {
 | 审批 / 待审批 | **odoo_approvals** |
 | 查看消息 / 邮件通知 | **odoo_get_messages** |
 | 查活动类型 | **odoo_activity_types** |
+| 通知推送状态 / 企微/钉钉连上没 | **odoo_notification_status** |
+| 测试一下通知推送 | **odoo_notification_test** |
+| 列出已接入的渠道 | **odoo_notification_channels** |
+| 关闭通知 / 别发待办了 / 夜里静音 / 只接收紧急 | **odoo_notification_prefs** |
+| 模拟一次企微/钉钉回复写回 Odoo | **odoo_notification_reply** |
+| 找一下关于 X 的知识库文章 / 搜知识库 | **odoo_knowledge_search** |
+| 把这篇文章读给我 / 文章 #X 写了什么 | **odoo_knowledge_read** |
+| 新建知识库文章 / 记一下这个到知识库 | **odoo_knowledge_create** |
+| 改一下这篇文章的标题/正文 | **odoo_knowledge_update** |
+| 追加到文章 X 末尾 / 往文章里补一段 | **odoo_knowledge_append** |
+| 知识库长啥样 / 工作区里都有哪些文章 | **odoo_knowledge_tree** |
+| 收藏这篇 / 取消收藏 | **odoo_knowledge_favorite** |
+| 把这篇文章扔进回收站 / 删除文章 | **odoo_knowledge_trash** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
 ### Odoo 常用模型
 project.task · project.project · project.milestone · mail.activity · calendar.event ·
 crm.lead · crm.stage · sale.order · purchase.order · helpdesk.ticket · account.move ·
 res.partner · hr.employee · hr.leave · hr.attendance · stock.quant · stock.picking ·
-account.analytic.line · approval.request · planning.slot
+account.analytic.line · approval.request · planning.slot · knowledge.article
 
 ### 日期 & 字段规范
 - date 字段：YYYY-MM-DD，今天=${todayStr}，明天=${tomorrowStr}
@@ -1111,21 +1579,98 @@ account.analytic.line · approval.request · planning.slot
 }
 
 // ── 处理 Odoo 更新通知 ────────────────────────────────────────────────────────
+/**
+ * Odoo 事件 → NotificationEnvelope → 全局通知总线
+ *
+ * 流程：
+ *   1. 应用 per-agent 偏好（enabled / kinds / minPriority / quietHours）
+ *   2. 缓存 envelope 溯源信息（供入站回复时定位 Odoo 记录）
+ *   3. publish 到 bus，渠道插件决定投递细节
+ *
+ * 本方法不感知具体渠道。
+ */
 function handleOdooUpdates(api: OpenClawPluginApi, updates: SyncUpdate[], aid: string) {
-  for (const update of updates) {
-    let title = '', body = '';
-    const d = update.data as Record<string, unknown>;
-    switch (update.type) {
-      case 'todo':     title = update.action === 'create' ? '新待办' : '待办更新'; body = String(d['name'] ?? ''); break;
-      case 'activity': title = '活动到期'; body = String(d['summary'] ?? '新活动'); break;
-      case 'message':  title = '新消息'; body = String(d['subject'] ?? '无主题'); break;
-      case 'email':    title = '新邮件通知'; body = `通知 ID: ${update.id}`; break;
-      case 'calendar': title = update.action === 'create' ? '新日历事件' : '日历更新'; body = String(d['name'] ?? ''); break;
+  if (updates.length === 0) return;
+
+  const prefs = prefsManager.load(aid);
+  const odooUrl = odooClients.get(aid)?.getSessionInfo().url;
+
+  let dispatched = 0;
+  let filtered = 0;
+  for (const u of updates) {
+    const env = toEnvelope(u, aid, odooUrl);
+    const decision = shouldDeliver(env, prefs);
+    if (!decision.deliver) {
+      filtered += 1;
+      api.logger.debug?.(`[odoo] agent=${aid} 丢弃 ${env.id}: ${decision.reason}`);
+      continue;
     }
-    if (title && body) {
-      (api as unknown as Record<string, unknown>)['sendNotification']?.({
-        agentId: aid, title: `辉火云·欧度 — ${title}`, body, data: update,
+
+    // 记录 envelope → 原记录 映射，以便回复时可以写回 chatter
+    if (env.origin?.model && env.origin?.resId) {
+      envelopeCache.set(env.id, {
+        agentId: aid,
+        model: env.origin.model,
+        resId: env.origin.resId,
       });
     }
+
+    notificationBus.publish(env).catch(err => {
+      api.logger.error(`[odoo] bus publish 失败 ${env.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    dispatched += 1;
   }
+
+  const subs = notificationBus.subscriberCount();
+  const transports = notificationBus.listTransports().map(t => t.name).join(',') || '无';
+  api.logger.info(
+    `[odoo] agent=${aid} 发布 ${dispatched}/${updates.length} 条（过滤 ${filtered}，订阅者=${subs}，渠道=${transports}）`,
+  );
+}
+
+// ── 处理入站回复（渠道 → Odoo chatter）──────────────────────────────────────
+async function handleInboundReply(api: OpenClawPluginApi, reply: InboundReply): Promise<void> {
+  const origin = envelopeCache.get(reply.envelopeId);
+  if (!origin) {
+    api.logger.warn?.(`[odoo] 入站回复找不到 envelope 溯源: ${reply.envelopeId}（来自 ${reply.channel}）`);
+    return;
+  }
+  if (!origin.model || !origin.resId) {
+    api.logger.warn?.(`[odoo] envelope ${reply.envelopeId} 无可写回目标（缺 model/resId）`);
+    return;
+  }
+
+  const client = odooClients.get(origin.agentId);
+  if (!client?.isAuthenticated()) {
+    api.logger.warn?.(`[odoo] agent=${origin.agentId} 未连接，忽略回复 ${reply.envelopeId}`);
+    return;
+  }
+
+  const bodyHtml = reply.html
+    ? reply.html
+    : `<p>${escapeHtml(reply.body)}</p>`;
+  const subject = `来自 ${reply.channel}${reply.fromUser ? ` / ${reply.fromUser}` : ''} 的回复`;
+
+  try {
+    const id = await client.call('mail.message', 'create', [{
+      model: origin.model,
+      res_id: origin.resId,
+      body: bodyHtml,
+      subject,
+      message_type: 'comment',
+      subtype_xmlid: 'mail.mt_comment',
+    }]);
+    api.logger.info(`[odoo] 入站回复已写入 ${origin.model}#${origin.resId}（mail.message ${String(id)}）`);
+  } catch (e) {
+    api.logger.error(`[odoo] 写回 Odoo chatter 失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
