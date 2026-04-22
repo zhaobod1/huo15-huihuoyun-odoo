@@ -1,7 +1,7 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.6.1",
-  "description": "火一五·辉火云·欧度插件 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，48 个工具覆盖任务、CRM、项目、工单、财务、销售、知识库；跨渠道通知基座（企微/钉钉/飞书）+ per-agent 偏好过滤 + 入站回复写回 chatter；知识库读写（knowledge.article）支持 markdown→HTML",
+  "version": "1.7.0",
+  "description": "火一五·辉火云·欧度插件 — 自然语言操作 Odoo 19 Enterprise，实施经理助手，63 个工具覆盖任务、活动闭环、日历、邮件（含模板）、附件/文档、关注者、CRM、项目、工单、财务、销售、知识库、批量更新、撤销；跨渠道通知基座（企微/钉钉/飞书）+ per-agent 偏好 + 入站回复写回 chatter",
   "type": "module",
   "main": "index.ts",
   "openclaw": {

@@ -1,8 +1,8 @@
 {
   "id": "odoo",
   "name": "火一五·辉火云·欧度插件",
-  "description": "自然语言操作 Odoo 19 Enterprise，per-agent 凭据隔离，实施经理助手，48 个工具覆盖任务、CRM、项目、工单、财务、库存、HR、审批、知识库；内置跨渠道通知基座（NotificationBus）：企微/钉钉/飞书订阅 Odoo 消息与活动提醒，per-agent 偏好过滤（kind/优先级/静音时段），入站回复自动写回 chatter；知识库（knowledge.article）读写支持 markdown→HTML、收藏、回收站、树视图",
-  "version": "1.6.1",
+  "description": "自然语言操作 Odoo 19 Enterprise，per-agent 凭据隔离，实施经理助手，63 个工具覆盖任务、活动闭环（完成/改期）、日历（今日/改期/取消）、邮件（直发/模板）、附件/文档上传、关注者、CRM、项目、工单、财务、库存、HR、审批、知识库、批量更新、撤销上一步；内置跨渠道通知基座（NotificationBus）：企微/钉钉/飞书订阅 Odoo 消息与活动提醒，per-agent 偏好过滤（kind/优先级/静音时段），入站回复自动写回 chatter",
+  "version": "1.7.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

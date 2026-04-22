@@ -7,7 +7,7 @@
  */
 
 import type { OdooConfig, OdooSession, OdooRecord, OdooError } from '../types/index.js';
-import { today } from '../utils/date-utils.js';
+import { today, tomorrow } from '../utils/date-utils.js';
 
 type DomainItem = string | [string, string, unknown];
 type Domain = DomainItem[];
@@ -559,6 +559,22 @@ export class OdooClient {
     return result.records;
   }
 
+  /**
+   * 完成活动（闭环）—— 调 mail.activity.action_feedback：
+   * 活动标记为 done、写入反馈到源记录 chatter、从活动列表里移除。
+   * 这是 Odoo 活动闭环的正式 API，不要直接 unlink。
+   */
+  async completeActivity(id: number, feedback?: string): Promise<unknown> {
+    return this.call('mail.activity', 'action_feedback', [[id]], {
+      feedback: feedback || '',
+    });
+  }
+
+  /** 改期：把活动的 date_deadline 挪到新日期（YYYY-MM-DD） */
+  async rescheduleActivity(id: number, newDeadline: string): Promise<boolean> {
+    return this.write('mail.activity', [id], { date_deadline: newDeadline });
+  }
+
   async createCalendarEvent(values: {
     name: string; start: string; stop: string;
     description?: string; partner_ids?: number[]; alarm_ids?: number[];
@@ -569,6 +585,198 @@ export class OdooClient {
       partner_ids: values.partner_ids ? [[6, false, values.partner_ids]] : [[6, false, [this.uid ?? 1]]],
       alarm_ids: values.alarm_ids ? [[6, false, values.alarm_ids]] : false,
     });
+  }
+
+  /**
+   * 获取今日会议/日程 —— 覆盖 [今天 00:00, 明天 00:00) 区间里与我相关的事件。
+   * 包含：我是组织者、或我是参与者（partner_ids 含 my partner_id）。
+   */
+  async getCalendarToday(options: { limit?: number } = {}): Promise<OdooRecord[]> {
+    const t = today();
+    const next = tomorrow();
+    const uid = this.uid ?? 0;
+    // 我的 partner_id 需要先查一次（cached on session user_context 里没有，所以 read res.users）
+    let myPartnerId: number | false = false;
+    try {
+      const users = await this.read('res.users', [uid], ['partner_id']);
+      const pid = users[0]?.['partner_id'];
+      if (Array.isArray(pid) && typeof pid[0] === 'number') myPartnerId = pid[0];
+    } catch { /* ignore */ }
+
+    const domain: Domain = [
+      ['start', '>=', `${t} 00:00:00`],
+      ['start', '<', `${next} 00:00:00`],
+    ];
+    if (myPartnerId) {
+      domain.unshift('|', ['user_id', '=', uid], ['partner_ids', 'in', [myPartnerId]]);
+    } else {
+      domain.unshift(['user_id', '=', uid]);
+    }
+
+    const result = await this.searchRead('calendar.event', domain,
+      ['id', 'name', 'start', 'stop', 'duration', 'location', 'partner_ids', 'description', 'user_id', 'allday'],
+      { limit: options.limit ?? 30, order: 'start asc' });
+    return result.records;
+  }
+
+  /** 更新日历事件（时间、地点、标题、描述、参与者） */
+  async updateCalendarEvent(id: number, values: {
+    name?: string; start?: string; stop?: string; location?: string;
+    description?: string; partner_ids?: number[];
+  }): Promise<boolean> {
+    const payload: Record<string, unknown> = {};
+    if (values.name !== undefined) payload['name'] = values.name;
+    if (values.start !== undefined) payload['start'] = values.start;
+    if (values.stop !== undefined) payload['stop'] = values.stop;
+    if (values.location !== undefined) payload['location'] = values.location;
+    if (values.description !== undefined) payload['description'] = values.description;
+    if (values.partner_ids !== undefined) payload['partner_ids'] = [[6, false, values.partner_ids]];
+    if (Object.keys(payload).length === 0) return true;
+    return this.write('calendar.event', [id], payload);
+  }
+
+  /** 取消日历事件：active=false（软删除，保留历史），而不是 unlink */
+  async cancelCalendarEvent(id: number): Promise<boolean> {
+    return this.write('calendar.event', [id], { active: false });
+  }
+
+  // ==================== 关注者（followers）====================
+  //
+  // Odoo 的 mail.thread 混入提供：
+  //   - message_subscribe(partner_ids, subtype_ids?) — 添加关注者
+  //   - message_unsubscribe(partner_ids)              — 移除关注者
+  //   - message_follower_ids                           — 列表
+  // 任何继承 mail.thread 的模型（project.task、crm.lead、helpdesk.ticket、
+  // sale.order、res.partner 等）都能用。
+
+  async followRecord(model: string, resId: number, partnerIds?: number[]): Promise<unknown> {
+    // 默认关注者 = 当前用户的 partner_id
+    let targets = partnerIds;
+    if (!targets || targets.length === 0) {
+      const uid = this.uid ?? 0;
+      const users = await this.read('res.users', [uid], ['partner_id']);
+      const pid = users[0]?.['partner_id'];
+      if (Array.isArray(pid) && typeof pid[0] === 'number') targets = [pid[0]];
+      else throw new Error('无法获取当前用户的 partner_id');
+    }
+    return this.call(model, 'message_subscribe', [[resId]], { partner_ids: targets });
+  }
+
+  async unfollowRecord(model: string, resId: number, partnerIds?: number[]): Promise<unknown> {
+    let targets = partnerIds;
+    if (!targets || targets.length === 0) {
+      const uid = this.uid ?? 0;
+      const users = await this.read('res.users', [uid], ['partner_id']);
+      const pid = users[0]?.['partner_id'];
+      if (Array.isArray(pid) && typeof pid[0] === 'number') targets = [pid[0]];
+      else throw new Error('无法获取当前用户的 partner_id');
+    }
+    return this.call(model, 'message_unsubscribe', [[resId]], { partner_ids: targets });
+  }
+
+  // ==================== 邮件（mail.mail + mail.template）====================
+  //
+  // 两条路径：
+  //   1) 随手发一封：用 message_post 发在某条记录的 chatter，Odoo 会自动
+  //      邮件化给 followers（如果 subtype 是 comment）。这是 Odoo 原生的"发邮件"方式。
+  //   2) 显式发邮件给任意地址：mail.mail create → send。适合真正"给外部发邮件"场景。
+  // 模板：mail.template.send_mail(res_id, force_send=True) 是 Odoo 原生的模板发送入口。
+
+  /**
+   * 直接发送邮件（不依赖 chatter）。
+   * recipients 为 email 字符串数组（逗号分隔会被 Odoo 自行拆分，但我们显式传逗号拼接）。
+   * bodyHtml 建议是 HTML，纯文本会按 <br/> 保留换行。
+   */
+  async sendEmail(values: {
+    subject: string; bodyHtml: string;
+    recipients: string[]; cc?: string[]; bcc?: string[];
+    res_model?: string; res_id?: number;
+    attachment_ids?: number[];
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      subject: values.subject,
+      body_html: values.bodyHtml,
+      email_to: values.recipients.join(','),
+      email_from: false, // Odoo 会用当前用户的邮箱/公司邮箱
+    };
+    if (values.cc && values.cc.length > 0) payload['email_cc'] = values.cc.join(',');
+    if (values.bcc && values.bcc.length > 0) (payload as Record<string, unknown>)['email_bcc'] = values.bcc.join(',');
+    if (values.res_model) payload['model'] = values.res_model;
+    if (values.res_id) payload['res_id'] = values.res_id;
+    if (values.attachment_ids && values.attachment_ids.length > 0) {
+      payload['attachment_ids'] = [[6, false, values.attachment_ids]];
+    }
+    const id = await this.create('mail.mail', payload);
+    // 立即发送（否则会等到 cron）
+    await this.call('mail.mail', 'send', [[id]]);
+    return id;
+  }
+
+  async getEmailTemplates(options: { model?: string; keyword?: string; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.model) domain.push(['model', '=', options.model]);
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    const result = await this.searchRead('mail.template', domain,
+      ['id', 'name', 'model', 'subject', 'email_from', 'email_to', 'use_default_to', 'lang'],
+      { limit: options.limit ?? 50, order: 'name asc' });
+    return result.records;
+  }
+
+  /**
+   * 用模板发邮件。template_id 通过 getEmailTemplates 查。
+   * res_id 是模板关联模型的记录 id（模板的 model 字段决定）。
+   * force_send=true 立即入队发送。
+   */
+  async sendEmailFromTemplate(templateId: number, resId: number, options: {
+    force_send?: boolean; email_values?: Record<string, unknown>;
+  } = {}): Promise<unknown> {
+    return this.call('mail.template', 'send_mail', [templateId, resId], {
+      force_send: options.force_send ?? true,
+      email_values: options.email_values ?? false,
+    });
+  }
+
+  // ==================== 附件（ir.attachment）/ 文档（documents.document）====================
+  //
+  // ir.attachment 是 Odoo 通用附件表；传 datas（base64 编码）即可。
+  // 挂到记录：res_model + res_id 就会在该记录的 chatter/附件面板出现。
+  // documents.document 是 Enterprise 文档管理应用，可选 folder_id 归档。
+
+  async attachFile(values: {
+    res_model: string; res_id: number;
+    name: string; datas_base64: string; mimetype?: string;
+  }): Promise<number> {
+    return this.create('ir.attachment', {
+      name: values.name,
+      datas: values.datas_base64,
+      res_model: values.res_model,
+      res_id: values.res_id,
+      type: 'binary',
+      mimetype: values.mimetype || 'application/octet-stream',
+    });
+  }
+
+  async listAttachments(model: string, resId: number, options: { limit?: number } = {}): Promise<OdooRecord[]> {
+    const result = await this.searchRead('ir.attachment',
+      [['res_model', '=', model], ['res_id', '=', resId]],
+      ['id', 'name', 'mimetype', 'file_size', 'create_date', 'create_uid', 'url', 'type'],
+      { limit: options.limit ?? 50, order: 'create_date desc' });
+    return result.records;
+  }
+
+  async uploadDocument(values: {
+    name: string; datas_base64: string; mimetype?: string;
+    folder_id?: number; tag_ids?: number[];
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      name: values.name,
+      datas: values.datas_base64,
+      type: 'binary',
+      mimetype: values.mimetype || 'application/octet-stream',
+    };
+    if (values.folder_id) payload['folder_id'] = values.folder_id;
+    if (values.tag_ids && values.tag_ids.length > 0) payload['tag_ids'] = [[6, false, values.tag_ids]];
+    return this.create('documents.document', payload);
   }
 
   async getUnreadMessages(options: { limit?: number } = {}): Promise<OdooRecord[]> {
