@@ -2043,7 +2043,414 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 63 个工具已注册（v1.7 — Daily Inbox 闭环 + 撤销）');
+  // ══════════════════════════════════════════════════════
+  // v1.8 — Project / Ticket / Chatter 闭环
+  // ══════════════════════════════════════════════════════
+
+  // ── Chatter 沟通 ──────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_message_post',
+    description: '在任意 mail.thread 记录（任务/商机/工单/订单/客户等）的 chatter 发评论。会触发邮件通知所有关注者。body 支持 markdown 或 HTML。用于"给客户在商机下留个进度说明"、"在工单里回客户一句"。内部记录（不发邮件）请用 odoo_message_log。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:          { type: 'string', description: 'Odoo 模型名（必填），如 "crm.lead"、"project.task"、"helpdesk.ticket"' },
+        res_id:         { type: 'number', description: '记录 id（必填）' },
+        body:           { type: 'string', description: '消息正文（markdown 或 HTML，必填）' },
+        subject:        { type: 'string', description: '主题（可选，邮件通知时显示）' },
+        partner_ids:    { type: 'array', items: { type: 'number' }, description: '额外 @提及 / 通知的 partner id 列表（可选）' },
+        attachment_ids: { type: 'array', items: { type: 'number' }, description: 'ir.attachment id 列表（先用 odoo_attach_file 得到 id）' },
+      },
+      required: ['model', 'res_id', 'body'],
+    },
+    async handler(
+      p: { model: string; res_id: number; body: string; subject?: string; partner_ids?: number[]; attachment_ids?: number[] },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.postMessage(p.model, p.res_id, {
+          bodyHtml: mdToHtml(p.body),
+          subject: p.subject,
+          partner_ids: p.partner_ids,
+          attachment_ids: p.attachment_ids,
+          as_log: false,
+        });
+        return { success: true, message_id: id, message: `已在 ${p.model} #${p.res_id} 发评论（mail.message #${id}，followers 会收到邮件通知）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_message_log',
+    description: '在记录 chatter 留内部记录（log note，不发邮件）。用于"给这条记录加个备注"、"记录一下今天的沟通要点"。与 odoo_message_post 的区别：log 不通知 followers。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:          { type: 'string', description: 'Odoo 模型名（必填）' },
+        res_id:         { type: 'number', description: '记录 id（必填）' },
+        body:           { type: 'string', description: '备注内容（markdown 或 HTML，必填）' },
+        subject:        { type: 'string', description: '标题（可选）' },
+        attachment_ids: { type: 'array', items: { type: 'number' }, description: 'ir.attachment id 列表（可选）' },
+      },
+      required: ['model', 'res_id', 'body'],
+    },
+    async handler(
+      p: { model: string; res_id: number; body: string; subject?: string; attachment_ids?: number[] },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.postMessage(p.model, p.res_id, {
+          bodyHtml: mdToHtml(p.body),
+          subject: p.subject,
+          attachment_ids: p.attachment_ids,
+          as_log: true,
+        });
+        return { success: true, message_id: id, message: `已在 ${p.model} #${p.res_id} 留内部记录（#${id}，不通知 followers）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_message_history',
+    description: '读取某条记录的 chatter 沟通历史（最新在前）。用于"这个商机跟进过什么"、"看看工单 #X 有哪些往来"。默认过滤掉系统通知。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:                 { type: 'string', description: 'Odoo 模型名（必填）' },
+        res_id:                { type: 'number', description: '记录 id（必填）' },
+        limit:                 { type: 'number', description: '上限，默认 20' },
+        include_notifications: { type: 'boolean', description: 'true=包含系统通知（自动关注、阶段变更等），默认 false' },
+      },
+      required: ['model', 'res_id'],
+    },
+    async handler(p: { model: string; res_id: number; limit?: number; include_notifications?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const msgs = await client.getMessageHistory(p.model, p.res_id, p);
+        return {
+          success: true,
+          count: msgs.length,
+          messages: msgs.map(m => ({
+            id: m['id'],
+            date: m['date'],
+            author: m['author_id'],
+            email_from: m['email_from'] || null,
+            subject: m['subject'] || null,
+            type: m['message_type'],
+            // 只给纯文本摘要，HTML 全文前端需要再查（避免单次响应爆炸）
+            summary: stripHtml(String(m['body'] ?? '')),
+          })),
+        };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ── 项目 ──────────────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_project_create',
+    description: '创建新项目。用于"开个新项目叫 XX"、"给客户 Y 建个实施项目"。privacy_visibility 决定可见范围：followers=仅关注者/employees=全体员工（默认）/portal=门户用户。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:               { type: 'string', description: '项目名（必填）' },
+        partner_id:         { type: 'number', description: '客户 partner id（可选）' },
+        user_id:            { type: 'number', description: '项目负责人 user id（可选，默认=当前用户）' },
+        date_start:         { type: 'string', description: '开始日期 YYYY-MM-DD' },
+        date:               { type: 'string', description: '结束日期 YYYY-MM-DD' },
+        description:        { type: 'string', description: '项目描述' },
+        privacy_visibility: { type: 'string', enum: ['followers', 'employees', 'portal'], description: '可见范围' },
+      },
+      required: ['name'],
+    },
+    async handler(
+      p: { name: string; partner_id?: number; user_id?: number; date_start?: string; date?: string; description?: string; privacy_visibility?: 'followers' | 'employees' | 'portal' },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createProject(p);
+        return { success: true, project_id: id, message: `项目 #${id}（${p.name}）已创建` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_project_update',
+    description: '更新项目字段：名称/负责人/起止日期/描述/归档等。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: {
+        project_id:  { type: 'number', description: '项目 id（必填）' },
+        name:        { type: 'string', description: '新名称' },
+        user_id:     { type: 'number', description: '新负责人 user id' },
+        partner_id:  { type: 'number', description: '新客户 partner id' },
+        date_start:  { type: 'string', description: '新开始日期 YYYY-MM-DD' },
+        date:        { type: 'string', description: '新结束日期 YYYY-MM-DD' },
+        description: { type: 'string', description: '新描述' },
+        active:      { type: 'boolean', description: 'active=false 归档项目' },
+      },
+      required: ['project_id'],
+    },
+    async handler(
+      p: { project_id: number; name?: string; user_id?: number; partner_id?: number; date_start?: string; date?: string; description?: string; active?: boolean },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      const values: Record<string, unknown> = {};
+      if (p.name !== undefined) values['name'] = p.name;
+      if (p.user_id !== undefined) values['user_id'] = p.user_id;
+      if (p.partner_id !== undefined) values['partner_id'] = p.partner_id;
+      if (p.date_start !== undefined) values['date_start'] = p.date_start || false;
+      if (p.date !== undefined) values['date'] = p.date || false;
+      if (p.description !== undefined) values['description'] = p.description;
+      if (p.active !== undefined) values['active'] = p.active;
+      if (Object.keys(values).length === 0) {
+        return { success: true, message: `项目 #${p.project_id} 无需更新（未提供任何字段）` };
+      }
+      try {
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_project_update',
+          model: 'project.project',
+          ids: [p.project_id],
+          values,
+          summary: `更新项目 #${p.project_id}（字段：${Object.keys(values).join(', ')}）`,
+        });
+        return { success: true, message: `项目 #${p.project_id} 已更新（可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ── 里程碑 ────────────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_milestone_create',
+    description: '为项目新建里程碑。用于"给项目 X 加一个 9 月底的交付里程碑"。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:       { type: 'string', description: '里程碑名称（必填）' },
+        project_id: { type: 'number', description: '所属项目 id（必填）' },
+        deadline:   { type: 'string', description: '截止日期 YYYY-MM-DD' },
+      },
+      required: ['name', 'project_id'],
+    },
+    async handler(p: { name: string; project_id: number; deadline?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createMilestone(p);
+        return { success: true, milestone_id: id, message: `里程碑 #${id}（${p.name}）已创建于项目 #${p.project_id}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_milestone_done',
+    description: '把里程碑标记为完成（写 is_reached=true + reached_date=today）。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: { milestone_id: { type: 'number', description: '里程碑 id（必填）' } },
+      required: ['milestone_id'],
+    },
+    async handler(p: { milestone_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_milestone_done',
+          model: 'project.milestone',
+          ids: [p.milestone_id],
+          values: { is_reached: true, reached_date: today() },
+          summary: `里程碑 #${p.milestone_id} 标记为已完成`,
+        });
+        return { success: true, message: `里程碑 #${p.milestone_id} 已完成（reached_date=${today()}，可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ── 任务指派 ──────────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_task_assign',
+    description: '指派一条或多条任务给一个/一批人（整份替换 user_ids）。用于"把这批任务都交给张三"、"加上李四一起做"。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: {
+        task_ids: { type: 'array', items: { type: 'number' }, description: '任务 id 列表（必填，至少 1 条）' },
+        user_ids: { type: 'array', items: { type: 'number' }, description: 'user id 列表（必填，整份替换）' },
+      },
+      required: ['task_ids', 'user_ids'],
+    },
+    async handler(p: { task_ids: number[]; user_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      if (!p.task_ids || p.task_ids.length === 0) return { success: false, message: 'task_ids 不能为空' };
+      if (!p.user_ids) return { success: false, message: 'user_ids 必填（传空数组表示清空）' };
+      try {
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_task_assign',
+          model: 'project.task',
+          ids: p.task_ids,
+          values: { user_ids: [[6, false, p.user_ids]] },
+          summary: `指派 ${p.task_ids.length} 条任务给 user(${p.user_ids.join(',')})`,
+        });
+        return { success: true, updated: p.task_ids.length, message: `${p.task_ids.length} 条任务已指派（可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ── 工单闭环 ──────────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_ticket_update',
+    description: '更新工单字段：名称/阶段/优先级/负责人/看板状态/截止。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: {
+        ticket_id:    { type: 'number', description: '工单 id（必填）' },
+        name:         { type: 'string', description: '新主题' },
+        stage_id:     { type: 'number', description: '新阶段 id' },
+        priority:     { type: 'string', enum: ['0', '1', '2', '3'], description: '0=普通 1=中 2=高 3=紧急' },
+        user_id:      { type: 'number', description: '新负责人 user id' },
+        kanban_state: { type: 'string', enum: ['normal', 'done', 'blocked'], description: '看板状态' },
+        sla_deadline: { type: 'string', description: '新 SLA 截止时间 YYYY-MM-DD HH:MM:SS' },
+      },
+      required: ['ticket_id'],
+    },
+    async handler(
+      p: { ticket_id: number; name?: string; stage_id?: number; priority?: string; user_id?: number; kanban_state?: string; sla_deadline?: string },
+      ctx: Record<string, unknown>,
+    ) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      const values: Record<string, unknown> = {};
+      if (p.name !== undefined) values['name'] = p.name;
+      if (p.stage_id !== undefined) values['stage_id'] = p.stage_id;
+      if (p.priority !== undefined) values['priority'] = p.priority;
+      if (p.user_id !== undefined) values['user_id'] = p.user_id;
+      if (p.kanban_state !== undefined) values['kanban_state'] = p.kanban_state;
+      if (p.sla_deadline !== undefined) values['sla_deadline'] = p.sla_deadline || false;
+      if (Object.keys(values).length === 0) {
+        return { success: true, message: `工单 #${p.ticket_id} 无需更新（未提供任何字段）` };
+      }
+      try {
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_ticket_update',
+          model: 'helpdesk.ticket',
+          ids: [p.ticket_id],
+          values,
+          summary: `更新工单 #${p.ticket_id}（字段：${Object.keys(values).join(', ')}）`,
+        });
+        return { success: true, message: `工单 #${p.ticket_id} 已更新（可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_ticket_close',
+    description: '关闭工单：把 stage_id 改到该团队 fold=true 的第一个阶段（= 关闭列）。如果找不到关闭阶段会报错让用户先建一个。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: {
+        ticket_id: { type: 'number', description: '工单 id（必填）' },
+      },
+      required: ['ticket_id'],
+    },
+    async handler(p: { ticket_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        // 先读 ticket 拿 team_id，再在 team 下找 fold=true 的阶段
+        const tks = await client.read('helpdesk.ticket', [p.ticket_id], ['team_id', 'stage_id']);
+        const t = tks[0];
+        if (!t) return { success: false, message: `工单 #${p.ticket_id} 不存在` };
+        const teamRef = t['team_id'];
+        const teamId = Array.isArray(teamRef) && typeof teamRef[0] === 'number' ? teamRef[0] : undefined;
+        const closedStage = await client.findHelpdeskClosedStage(teamId);
+        if (!closedStage) {
+          return { success: false, message: `团队 ${teamId ?? '(unset)'} 下找不到 fold=true 的关闭阶段。请先到 Odoo 客服应用里给这个团队建一个"已完成"阶段（fold=true）。` };
+        }
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_ticket_close',
+          model: 'helpdesk.ticket',
+          ids: [p.ticket_id],
+          values: { stage_id: closedStage['id'] as number, kanban_state: 'done' },
+          summary: `关闭工单 #${p.ticket_id}（stage_id → ${String(closedStage['name'])}）`,
+        });
+        return { success: true, stage: closedStage['name'], message: `工单 #${p.ticket_id} 已关闭（stage=${String(closedStage['name'])}，可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_ticket_assign',
+    description: '指派工单给某位工程师。支持 odoo_undo_last 撤销。',
+    schema: {
+      type: 'object',
+      properties: {
+        ticket_id: { type: 'number', description: '工单 id（必填）' },
+        user_id:   { type: 'number', description: '新负责人 user id（必填）' },
+      },
+      required: ['ticket_id', 'user_id'],
+    },
+    async handler(p: { ticket_id: number; user_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await loggedWrite(client, ctx, {
+          tool: 'odoo_ticket_assign',
+          model: 'helpdesk.ticket',
+          ids: [p.ticket_id],
+          values: { user_id: p.user_id },
+          summary: `指派工单 #${p.ticket_id} 给 user #${p.user_id}`,
+        });
+        return { success: true, message: `工单 #${p.ticket_id} 已指派给 user #${p.user_id}（可用 odoo_undo_last 撤销）` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ── 审批动作 ──────────────────────────────────────────
+  api.registerTool({
+    name: 'odoo_approval_approve',
+    description: '作为审批人批准一条审批请求（调 approval.request.action_approve）。用于"批了这条请假/采购申请"。注意：只能操作你本人是审批人的请求。',
+    schema: {
+      type: 'object',
+      properties: { request_id: { type: 'number', description: '审批请求 id（必填）' } },
+      required: ['request_id'],
+    },
+    async handler(p: { request_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.approveApprovalRequest(p.request_id);
+        return { success: true, message: `审批请求 #${p.request_id} 已批准` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_approval_refuse',
+    description: '作为审批人拒绝审批请求（调 approval.request.action_refuse）。用于"驳回这条申请"。',
+    schema: {
+      type: 'object',
+      properties: { request_id: { type: 'number', description: '审批请求 id（必填）' } },
+      required: ['request_id'],
+    },
+    async handler(p: { request_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.refuseApprovalRequest(p.request_id);
+        return { success: true, message: `审批请求 #${p.request_id} 已拒绝` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.logger.info('[odoo] 76 个工具已注册（v1.8 — Project/Ticket/Chatter 闭环）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -2087,26 +2494,26 @@ function registerHooks(api: OpenClawPluginApi) {
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
 
-### 工具速查（共 63 个）
+### 工具速查（共 76 个）
 
 **基础**：odoo_connect · odoo_status · odoo_disconnect
-**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages
+**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages · odoo_task_assign
 **活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_complete_activity · odoo_reschedule_activity
 **日历**：odoo_create_event · odoo_calendar_today · odoo_update_event · odoo_cancel_event
-**消息**：odoo_get_messages · odoo_send_message
+**消息**：odoo_get_messages · odoo_send_message · odoo_message_post · odoo_message_log · odoo_message_history
 **邮件**：odoo_send_email · odoo_email_templates · odoo_email_from_template
 **附件**：odoo_attach_file · odoo_list_attachments · odoo_document_upload
 **关注者**：odoo_follow · odoo_unfollow
 **搜索**：odoo_search
 **CRM** ：odoo_crm_pipeline · odoo_crm_create · odoo_crm_update · odoo_crm_won · odoo_crm_lost
-**项目**：odoo_project_overview · odoo_timesheet_log
+**项目**：odoo_project_overview · odoo_timesheet_log · odoo_project_create · odoo_project_update · odoo_milestone_create · odoo_milestone_done
 **销售**：odoo_sale_orders · odoo_purchase_orders
-**客服**：odoo_tickets · odoo_ticket_create
+**客服**：odoo_tickets · odoo_ticket_create · odoo_ticket_update · odoo_ticket_close · odoo_ticket_assign
 **财务**：odoo_invoices
 **联系人**：odoo_contacts · odoo_contact_create
 **库存**：odoo_stock_levels · odoo_stock_pickings
 **HR** ：odoo_employees · odoo_leaves · odoo_attendances
-**审批**：odoo_approvals
+**审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
 **知识库**：odoo_knowledge_search · odoo_knowledge_read · odoo_knowledge_create · odoo_knowledge_update · odoo_knowledge_append · odoo_knowledge_tree · odoo_knowledge_favorite · odoo_knowledge_trash
@@ -2171,6 +2578,19 @@ function registerHooks(api: OpenClawPluginApi) {
 | 上传到文档库 / 归档到文件夹 | **odoo_document_upload** |
 | 把这批任务都改成完成 / 批量改阶段 | **odoo_bulk_update** |
 | 撤销上一步 / 撤回刚才那个 / 改错了 | **odoo_undo_last** |
+| 给商机/工单/任务下面留个进度说明 / 在 chatter 回一句 | **odoo_message_post** |
+| 记一下备注 / 留个内部记录（不发邮件） | **odoo_message_log** |
+| 这个记录都聊过什么 / 看看跟进历史 | **odoo_message_history** |
+| 开个新项目 / 新建项目 | **odoo_project_create** |
+| 改项目的负责人/日期/描述 | **odoo_project_update** |
+| 给项目加个里程碑 / 新建里程碑 | **odoo_milestone_create** |
+| 里程碑达成了 / 标记完成 | **odoo_milestone_done** |
+| 把这批任务都交给张三 / 指派任务 | **odoo_task_assign** |
+| 改工单的阶段/优先级/负责人 | **odoo_ticket_update** |
+| 关闭工单 / 工单处理完了 | **odoo_ticket_close** |
+| 把工单派给 X | **odoo_ticket_assign** |
+| 批这条 / 审批通过 | **odoo_approval_approve** |
+| 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
 ### Odoo 常用模型

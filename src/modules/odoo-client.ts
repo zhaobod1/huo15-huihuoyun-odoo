@@ -922,6 +922,128 @@ export class OdooClient {
     return this.call('knowledge.article', 'action_unarchive', [[id]]);
   }
 
+  // ==================== v1.8 — Chatter / Project / Ticket / Approval ====================
+  //
+  // Chatter = Odoo 的内置沟通轨迹。任何 mail.thread 混入的模型（几乎所有业务模型）
+  // 都有 message_post() 方法：
+  //   - subtype 'mail.mt_comment'   → 评论，会 email 给 followers
+  //   - subtype 'mail.mt_note'      → 内部记录，只留痕不发邮件
+  // body 是 HTML；message_type 常用 'comment' / 'notification'。
+
+  /**
+   * 在任意记录 chatter 发消息（评论，会通知 followers）。
+   * partner_ids 传进来会被当作额外收件人加入。
+   */
+  async postMessage(model: string, resId: number, values: {
+    bodyHtml: string;
+    subject?: string;
+    partner_ids?: number[];
+    attachment_ids?: number[];
+    as_log?: boolean;                // true = 内部记录（mt_note），false = 评论（mt_comment）
+  }): Promise<number> {
+    const kwargs: Record<string, unknown> = {
+      body: values.bodyHtml,
+      message_type: values.as_log ? 'notification' : 'comment',
+      subtype_xmlid: values.as_log ? 'mail.mt_note' : 'mail.mt_comment',
+    };
+    if (values.subject) kwargs['subject'] = values.subject;
+    if (values.partner_ids && values.partner_ids.length > 0) {
+      kwargs['partner_ids'] = values.partner_ids;
+    }
+    if (values.attachment_ids && values.attachment_ids.length > 0) {
+      kwargs['attachment_ids'] = values.attachment_ids;
+    }
+    const result = await this.call(model, 'message_post', [[resId]], kwargs);
+    if (typeof result === 'number') return result;
+    // Odoo 19 返回的是 mail.message 记录（dict），取 id
+    if (typeof result === 'object' && result !== null && 'id' in (result as Record<string, unknown>)) {
+      const r = result as Record<string, unknown>;
+      return typeof r['id'] === 'number' ? r['id'] : 0;
+    }
+    return 0;
+  }
+
+  /** 读取某条记录的 chatter 消息历史（最新在前） */
+  async getMessageHistory(model: string, resId: number, options: {
+    limit?: number;
+    include_notifications?: boolean;   // 默认 false，过滤掉系统通知（auto-followers 之类）
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['model', '=', model], ['res_id', '=', resId]];
+    if (!options.include_notifications) {
+      domain.push(['message_type', 'in', ['comment', 'email']]);
+    }
+    const result = await this.searchRead('mail.message', domain,
+      ['id', 'date', 'author_id', 'email_from', 'subject', 'body', 'message_type', 'subtype_id'],
+      { limit: options.limit ?? 20, order: 'date desc' });
+    return result.records;
+  }
+
+  // ------- Project / Milestone ------------------------------------------------
+
+  async createProject(values: {
+    name: string;
+    partner_id?: number;
+    user_id?: number;                   // 项目负责人
+    date_start?: string;
+    date?: string;                      // 结束日期
+    description?: string;
+    privacy_visibility?: 'followers' | 'employees' | 'portal';
+  }): Promise<number> {
+    return this.create('project.project', {
+      name: values.name,
+      partner_id: values.partner_id || false,
+      user_id: values.user_id || this.uid || false,
+      date_start: values.date_start || false,
+      date: values.date || false,
+      description: values.description || '',
+      privacy_visibility: values.privacy_visibility || 'employees',
+      active: true,
+    });
+  }
+
+  async createMilestone(values: {
+    name: string;
+    project_id: number;
+    deadline?: string;
+  }): Promise<number> {
+    return this.create('project.milestone', {
+      name: values.name,
+      project_id: values.project_id,
+      deadline: values.deadline || false,
+    });
+  }
+
+  // ------- Helpdesk ticket 更新/关闭 ----------------------------------------
+
+  /**
+   * 查找某客服团队里 fold=true 的阶段（= 关闭阶段）。
+   * 不传 teamId 就找任何 fold=true 的阶段，返回最小 sequence 的那条。
+   */
+  async findHelpdeskClosedStage(teamId?: number): Promise<OdooRecord | null> {
+    const domain: Domain = [['fold', '=', true]];
+    if (teamId) domain.push(['team_ids', 'in', [teamId]]);
+    const result = await this.searchRead('helpdesk.stage', domain,
+      ['id', 'name', 'sequence'], { limit: 1, order: 'sequence asc' });
+    return result.records[0] ?? null;
+  }
+
+  // ------- 审批 approval.request -------------------------------------------
+  //
+  // 审批流状态机：
+  //   new → pending（action_confirm）→ approved（action_approve）
+  //                                  → refused  （action_refuse）
+  //                                  → cancel   （action_withdraw）
+  // 我们只暴露 approve / refuse 两个最常见的审批人动作；
+  // 发起人侧的 action_confirm 可以后续再加。
+
+  async approveApprovalRequest(id: number): Promise<unknown> {
+    return this.call('approval.request', 'action_approve', [[id]]);
+  }
+
+  async refuseApprovalRequest(id: number): Promise<unknown> {
+    return this.call('approval.request', 'action_refuse', [[id]]);
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{
