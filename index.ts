@@ -109,16 +109,41 @@ async function initOdooClient(
   return client;
 }
 
-/** 尝试从持久化配置恢复 agent 连接（静默，不抛错） */
+/**
+ * 尝试恢复 agent 连接 —— 走 fallback 链，静默失败。
+ *
+ * 查找顺序（v1.10 共享凭据模型）：
+ *   1) `{agentId}.json`          该 agent 的独立凭据（private）
+ *   2) `default.json`            共享凭据（首次 connect 默认写这里）
+ *   3) legacy `odoo-config.json` 向下兼容
+ *   4) `api.pluginConfig.odoo`   manifest 预填的静态凭据（零配置部署）
+ *
+ * 1-3 由 ConfigManager.load 内部处理；4 在这里兜底。
+ * 只要任一层命中，就 init client 缓存在 odooClients[agentId] 下 —— 不同 agent
+ * 命中同一份凭据时各自持有独立的 OdooClient 实例，session 隔离。
+ */
 async function tryRestoreAgent(api: OpenClawPluginApi, agentId: string): Promise<OdooClient | undefined> {
   if (odooClients.get(agentId)?.isAuthenticated()) return odooClients.get(agentId);
-  const saved = configManager.load(agentId);
-  if (!saved?.odoo) return undefined;
+
+  // 1-3: ConfigManager 内置 fallback
+  let saved = configManager.load(agentId);
+
+  // 4: pluginConfig 兜底
+  let sourceLabel: string;
+  if (!saved?.odoo) {
+    const fromManifest = (api.pluginConfig as OdooPluginConfig | undefined)?.odoo;
+    if (!fromManifest) return undefined;
+    saved = { odoo: fromManifest };
+    sourceLabel = 'pluginConfig';
+  } else {
+    sourceLabel = configManager.getActiveSource(agentId);
+  }
+
   try {
-    api.logger.info(`[odoo] 恢复 agent=${agentId} 的连接...`);
-    return await initOdooClient(api, saved.odoo, agentId);
+    api.logger.info(`[odoo] 恢复 agent=${agentId} 的连接（来源: ${sourceLabel}）...`);
+    return await initOdooClient(api, saved.odoo!, agentId);
   } catch (err) {
-    api.logger.error(`[odoo] agent=${agentId} 恢复失败: ${err instanceof Error ? err.message : String(err)}`);
+    api.logger.error(`[odoo] agent=${agentId} 恢复失败（来源 ${sourceLabel}）: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
 }
@@ -212,7 +237,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_connect',
-    description: '连接辉火云企业套件系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
+    description: '连接辉火云企业套件。默认保存为【共享凭据】—— 组织内所有渠道（企微/钉钉/飞书）的所有 agent 都会自动复用，无需每个人重新输入。如需给当前会话单独使用一套专属凭据，传 private=true。db 为可选，不传则自动检测（单库自动、多库返回列表）。',
     schema: {
       type: 'object',
       properties: {
@@ -220,10 +245,14 @@ function registerTools(api: OpenClawPluginApi) {
         db:       { type: 'string', description: '数据库名称（可选，只有一个数据库时可省略）' },
         username: { type: 'string', description: '用户名（邮箱或登录名）' },
         password: { type: 'string', description: '密码' },
+        private:  { type: 'boolean', description: '可选，默认 false。true = 仅保存为当前会话专属凭据（只覆盖当前 agent）；false = 保存为组织共享凭据（全员复用，推荐）' },
       },
       required: ['url', 'username', 'password'],
     },
-    async handler(params: { url: string; db?: string; username: string; password: string }, ctx: Record<string, unknown>) {
+    async handler(
+      params: { url: string; db?: string; username: string; password: string; private?: boolean },
+      ctx: Record<string, unknown>,
+    ) {
       const aid = getAgentId(ctx);
       let db = params.db;
 
@@ -243,10 +272,18 @@ function registerTools(api: OpenClawPluginApi) {
       }
 
       const cfg = { url: params.url, db, username: params.username, password: params.password };
+      const scope: 'shared' | 'agent' = params.private ? 'agent' : 'shared';
       try {
         await initOdooClient(api, cfg, aid);
-        configManager.saveOdooConfig(cfg, aid);
-        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云企业套件！` };
+        configManager.saveOdooConfig(cfg, aid, scope);
+        const scopeMsg = scope === 'shared'
+          ? '已保存为【共享凭据】—— 组织内所有渠道的 @ 机器人用户都会自动使用这套凭据，无需再输入。'
+          : '已保存为【当前会话专属凭据】—— 只对当前 agent 生效，不影响其他成员。';
+        return {
+          success: true,
+          scope,
+          message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云企业套件！${scopeMsg}`,
+        };
       } catch (e) { return { success: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }; }
     },
   });
@@ -265,10 +302,17 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_disconnect',
-    description: '断开辉火云企业套件连接并清除已保存的凭据。',
-    schema: { type: 'object', properties: {} },
-    async handler(_p: unknown, ctx: Record<string, unknown>) {
+    description: '断开当前会话的辉火云企业套件连接。默认安全模式：只清除当前 agent 的【独立凭据】（如有），不会影响组织的【共享凭据】。如需彻底清除全员共用的共享凭据（高危，会导致所有成员断开），传 force_shared=true。',
+    schema: {
+      type: 'object',
+      properties: {
+        force_shared: { type: 'boolean', description: '可选，默认 false。true = 同时清除组织共享凭据（影响所有成员）；false = 只断开当前会话，保留共享凭据' },
+      },
+    },
+    async handler(p: { force_shared?: boolean } | undefined, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
+      const sourceBefore = configManager.getActiveSource(aid);
+
       pollers.get(aid)?.stop();
       pollers.delete(aid);
       const client = odooClients.get(aid);
@@ -276,8 +320,62 @@ function registerTools(api: OpenClawPluginApi) {
         try { await client.destroy(); } catch { /* ignore */ }
         odooClients.delete(aid);
       }
-      configManager.clear(aid);
-      return { success: true, message: '已断开连接并清除凭据。如需重新连接，请提供系统地址、用户名和密码。' };
+
+      const hadOwn = configManager.clearOwnConfig(aid);
+      let sharedCleared = false;
+      if (p?.force_shared) {
+        sharedCleared = configManager.clearSharedConfig();
+      }
+
+      let message: string;
+      if (sharedCleared) {
+        message = '⚠️ 已断开当前会话，并清除了组织【共享凭据】。所有渠道的 @ 机器人成员都需要重新连接。';
+      } else if (hadOwn) {
+        message = '已断开当前会话的【专属凭据】。组织共享凭据未受影响 —— 下一次 @ 机器人会自动 fallback 到共享凭据。';
+      } else if (sourceBefore === 'shared' || sourceBefore === 'legacy') {
+        message = '当前会话已从内存断开，但用的是组织【共享凭据】，已为你保留 —— 不影响其他成员。下一次 @ 机器人会自动重连。如需彻底清除共享凭据，调用 odoo_disconnect(force_shared=true)。';
+      } else {
+        message = '当前会话已断开。';
+      }
+      return { success: true, sharedCleared, hadOwnConfig: hadOwn, message };
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_whoami',
+    description: '查看当前 @ 机器人的会话使用的是哪套辉火云凭据 —— 共享凭据 / 当前会话专属 / manifest 静态预填 / 未连接。用于排查"为什么 @ 机器人时没问我密码？"或"我的连接是哪套？"等疑问。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const aid = getAgentId(ctx);
+      const client = odooClients.get(aid);
+      const connected = client?.isAuthenticated() ?? false;
+      const source = configManager.getActiveSource(aid);
+      const info = client?.getSessionInfo();
+      const fromManifest = (api.pluginConfig as OdooPluginConfig | undefined)?.odoo;
+
+      const sourceLabel: Record<string, string> = {
+        agent: '当前会话专属凭据（{agentId}.json）',
+        shared: '组织共享凭据（default.json，全员共用）',
+        legacy: '历史遗留单文件凭据（odoo-config.json）',
+        none: fromManifest ? 'manifest 静态预填（pluginConfig.odoo）' : '未连接（无任何凭据来源）',
+      };
+
+      return {
+        success: true,
+        connected,
+        agentId: aid,
+        source,
+        sourceLabel: sourceLabel[source] ?? '未知',
+        url: info?.url ?? null,
+        username: info?.username ?? null,
+        uid: info?.uid ?? null,
+        sharedConfigExists: configManager.hasSharedConfig(),
+        ownConfigExists: configManager.hasOwnConfig(aid),
+        manifestConfigExists: !!fromManifest,
+        message: connected
+          ? `当前 @ 机器人会话已连接到 ${info?.url}（用户 ${info?.username}），凭据来源：${sourceLabel[source]}。`
+          : `当前会话尚未连接。${configManager.hasSharedConfig() ? '组织已配共享凭据但本会话还没激活，下一次操作会自动连接。' : (fromManifest ? '插件 manifest 已预填凭据，下一次操作会自动连接。' : '需要先调用 odoo_connect 配置凭据（默认会保存为全员共享）。')}`,
+      };
     },
   });
 
@@ -2450,7 +2548,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 76 个工具已注册（v1.8 — Project/Ticket/Chatter 闭环）');
+  api.logger.info('[odoo] 77 个工具已注册（v1.10 — 共享凭据 + 跨渠道复用）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -2476,22 +2574,33 @@ function registerHooks(api: OpenClawPluginApi) {
 > 和工具名（odoo_xxx）是技术标识符，仅在调试说明里出现，不要在面向用户的
 > 正文里直接朗读。
 
-插件已加载但当前用户（agent: ${aid}）尚未连接到辉火云企业套件。当用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你必须：
+> **共享凭据规则（v1.10）**：组织内只需有任意一个人配过一次凭据（默认会保存
+> 为【组织共享凭据】），后续任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人时，
+> **自动复用同一套凭据，禁止再次询问 URL/用户名/密码**。本会话之所以走到
+> "未连接"，是因为还没有任何人配过共享凭据，也没有 manifest 静态预填。
 
-1. 告诉用户需要先连接辉火云企业套件
-2. 依次询问以下信息：
+插件已加载，当前 agent (\`${aid}\`) 尚未连接到辉火云企业套件，且组织内也没有任何人配过共享凭据。当用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你应该：
+
+1. **首先说明**："看起来咱们组织还没有人配过辉火云连接。配一次之后，所有同事 @ 我都能用，不需要再输入。"
+2. 询问：
    - **公司系统地址**（URL）：例如 https://www.huo15.com
    - **用户名**（邮箱或登录名）
    - **密码**
-3. **数据库名不需要主动询问** — odoo_connect 会自动检测。如果只有一个数据库会自动连接；如果有多个数据库，工具会返回列表，届时再让用户选择。
-4. 收集到 URL、用户名、密码后，立即调用 **odoo_connect**（不传 db 参数）
-5. 连接成功后凭据会自动保存，下次使用无需重新输入
+3. **数据库名不需要主动询问** — odoo_connect 会自动检测（单库自动选、多库返列表）
+4. 收集到 URL、用户名、密码后，调用 **odoo_connect**（默认 \`private=false\`，即保存为共享凭据 — 推荐）
+5. 仅当用户明确说"只给我自己用"或"我不想让别人用"时，才传 \`private: true\`
+6. **重要**：如果用户在群里 @ 你，更要解释清楚"配一次全员通用"，避免每个成员都被反复问凭据
 
-示例引导话术："要使用辉火云企业套件，需要先连接您公司的系统。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
+示例引导话术："要使用辉火云企业套件，配一次咱们组织所有同事就都能用了。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
       };
     }
 
     const info = client.getSessionInfo();
+    const credSource = configManager.getActiveSource(aid);
+    const credSourceLabel = credSource === 'agent' ? '当前会话专属凭据'
+      : credSource === 'shared' ? '组织共享凭据（全员复用）'
+      : credSource === 'legacy' ? '历史遗留凭据'
+      : 'manifest 静态预填';
     return {
       appendSystemContext: `
 ## 辉火云企业套件 已连接
@@ -2501,12 +2610,19 @@ function registerHooks(api: OpenClawPluginApi) {
 > （如 project.task）仅在调试说明里出现，面向用户的正文请用中文业务术语
 > （"任务"/"商机"/"工单"/"内部动态"而非"chatter"等）。
 
+> **共享凭据规则（v1.10）**：当前会话用的凭据是【${credSourceLabel}】。
+> 如果是【组织共享凭据】，意味着任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人都
+> 自动用这套，**绝对不要在群里再向用户询问 URL/用户名/密码**。
+> 如果用户主动要换凭据，告诉他们调用 odoo_connect（默认仍是共享，private=true 则只覆盖自己）。
+> 如果用户疑惑"为什么没问我密码"，调用 odoo_whoami 给他看清当前来源。
+
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
+**凭据来源：** ${credSourceLabel}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
 
-### 工具速查（共 76 个）
+### 工具速查（共 77 个）
 
-**基础**：odoo_connect · odoo_status · odoo_disconnect
+**基础**：odoo_connect · odoo_status · odoo_disconnect · odoo_whoami
 **任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages · odoo_task_assign
 **活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_complete_activity · odoo_reschedule_activity
 **日历**：odoo_create_event · odoo_calendar_today · odoo_update_event · odoo_cancel_event
@@ -2601,6 +2717,7 @@ function registerHooks(api: OpenClawPluginApi) {
 | 把工单派给 X | **odoo_ticket_assign** |
 | 批这条 / 审批通过 | **odoo_approval_approve** |
 | 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
+| 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
 ### 常用数据模型（技术内部标识，不在正文中朗读）
