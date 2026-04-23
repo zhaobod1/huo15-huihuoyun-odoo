@@ -1,13 +1,13 @@
 ---
 name: huo15-claude-odoo
 displayName: 火一五·辉火云企业套件插件
-description: 自然语言操作 Odoo 19 Enterprise — 实施经理助手，覆盖任务、CRM、项目、工单、财务、销售
+description: 自然语言操作 辉火云企业套件 — 实施经理助手，覆盖任务、CRM、项目、工单、财务、销售
 version: 1.1.0
 ---
 
 # 辉火云企业套件插件使用指南
 
-OpenClaw 龙虾的 Odoo 19 Enterprise 插件。连接后即可用自然语言全面操作辉火云系统，
+OpenClaw 龙虾的辉火云企业套件插件。连接后即可用自然语言全面操作辉火云系统，
 尤其适合**实施经理、项目经理、销售经理**的日常工作场景。
 
 ---
@@ -16,7 +16,7 @@ OpenClaw 龙虾的 Odoo 19 Enterprise 插件。连接后即可用自然语言全
 
 ### 方式一：通过对话连接（推荐）
 
-> 帮我连接 Odoo，地址 https://www.huo15.com，数据库 huo15，账号 admin@huo15.com，密码 xxxxxx
+> 帮我连接辉火云企业套件，地址 https://www.huo15.com，数据库 huo15，账号 admin@huo15.com，密码 xxxxxx
 
 龙虾会自动调用 `odoo_connect` 工具，连接信息保存本地，下次启动自动恢复。
 
@@ -76,7 +76,7 @@ OpenClaw 龙虾的 Odoo 19 Enterprise 插件。连接后即可用自然语言全
 
 ## 活动提醒
 
-活动（mail.activity）关联到具体的 Odoo 记录（任务、商机、客户等）。
+活动（mail.activity）关联到具体的辉火云记录（任务、商机、客户等）。
 
 | 你说 | 龙虾做什么 |
 |------|-----------|
@@ -205,7 +205,7 @@ OpenClaw 龙虾的 Odoo 19 Enterprise 插件。连接后即可用自然语言全
 ### 基础
 | 工具 | 说明 |
 |------|------|
-| odoo_connect | 连接 Odoo 系统 |
+| odoo_connect | 连接辉火云企业套件 |
 | odoo_status | 检查连接状态和轮询状态 |
 
 ### 任务 & 活动

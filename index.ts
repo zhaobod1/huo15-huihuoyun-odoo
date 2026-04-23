@@ -1,19 +1,19 @@
 /**
- * 火一五·辉火云·欧度插件（Odoo 19 Enterprise）v1.3
+ * 火一五·辉火云企业套件插件 v1.9
  *
- * v1.3 新增：
- * - 跨渠道通知基座（NotificationBus）：Odoo 消息/活动/待办统一封装成
- *   NotificationEnvelope，发布到全局 bus；企微、钉钉、飞书、webhook 等
- *   任意渠道插件只需 subscribe 或 registerTransport 即可接收，本插件
- *   无需事先知道具体渠道。
- * - 新增工具：odoo_notification_status / odoo_notification_channels /
- *   odoo_notification_test
+ * 品牌口径：对外统一称"辉火云企业套件"。代码内部的类名/文件名/tool 名沿用
+ * 历史标识符（OdooClient/odoo-client.ts/odoo_*），因为改动会破坏 agent
+ * 历史 memory 与已部署配置；它们仅作为技术 id 存在，不进入用户可见文案。
  *
- * v1.2：
- * - 每个 WeCom 动态 agent 用户独立的 Odoo 凭据存储
- * - 首次使用自动引导输入系统地址、用户名、密码
- * - 数据库自动检测（单库自动连接，多库让用户选择）
- * - 联系人/客户管理、库存查询、HR、审批流
+ * v1.9 品牌化：
+ * - 所有用户可见文案（tool description、prompt hint、错误消息、通知文案）
+ *   统一使用"辉火云企业套件"/"辉火云"
+ * - 加入 prompt 硬规则：对外沟通时不得透露第三方商标
+ *
+ * v1.8：Project/Ticket/Chatter 闭环（+13 tools）
+ * v1.7：Daily Inbox 闭环（活动/日历/邮件/附件/关注者/批量/撤销）
+ * v1.6：跨渠道通知基座（企微/钉钉/飞书）+ per-agent 偏好 + 入站回复 + 知识库
+ * v1.2：per-agent 凭据隔离
  */
 
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
@@ -49,21 +49,21 @@ let replyUnsubscribe: (() => void) | null = null;
 
 export default definePluginEntry({
   id: 'odoo',
-  name: '火一五·辉火云·欧度插件',
-  description: '自然语言操作辉火云·欧度（Odoo 19），实施经理助手，per-agent 凭据隔离',
+  name: '火一五·辉火云企业套件插件',
+  description: '自然语言操作辉火云企业套件，实施经理助手，per-agent 凭据隔离',
 
   register(api: OpenClawPluginApi) {
     // 不在启动时全局连接。每个 agent 的连接在 before_prompt_build 或 odoo_connect 时按需恢复。
     registerTools(api);
     registerHooks(api);
 
-    // 订阅入站回复 —— 渠道收到用户回复后调用 bus.reply()，这里把文字写回 Odoo chatter
+    // 订阅入站回复 —— 渠道收到用户回复后调用 bus.reply()，这里把文字写回 辉火云内部动态
     replyUnsubscribe?.();
     replyUnsubscribe = notificationBus.onReply(async (reply) => {
       await handleInboundReply(api, reply);
     });
 
-    api.logger.info('[odoo] 插件 v1.4 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复）');
+    api.logger.info('[odoo] 辉火云企业套件插件 v1.9 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复 + 品牌化）');
   },
 });
 
@@ -130,7 +130,7 @@ function getClient(ctx: Record<string, unknown>): OdooClient | undefined {
   return client?.isAuthenticated() ? client : undefined;
 }
 function notConnected() {
-  return { success: false, message: '未连接到辉火云·欧度，请先提供系统地址、用户名和密码进行连接。' };
+  return { success: false, message: '未连接到辉火云企业套件，请先提供系统地址、用户名和密码进行连接。' };
 }
 function getAgentId(ctx: Record<string, unknown>) {
   return (ctx['agentId'] as string | undefined)?.trim() || 'default';
@@ -140,7 +140,7 @@ function stripHtml(html: string) {
 }
 
 /**
- * 把 Odoo read() 返回的字段值归一化为 write() 可接受的形式。
+ * 把后端 read() 返回的字段值归一化为 write() 可接受的形式。
  *   - null / undefined / false → false
  *   - many2one: [id, "名称"]    → id（write 只收 id）
  *   - many2many: [id1, id2, …]  → [[6, false, [id1, id2, …]]]（write 要求 command tuple）
@@ -212,11 +212,11 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_connect',
-    description: '连接辉火云·欧度（Odoo 19）系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
+    description: '连接辉火云企业套件系统。db 为可选，若不传则自动检测数据库（仅一个时自动选择，多个时返回列表供用户选择）。',
     schema: {
       type: 'object',
       properties: {
-        url:      { type: 'string', description: 'Odoo 系统地址，如 https://www.huo15.com' },
+        url:      { type: 'string', description: '辉火云企业套件 系统地址，如 https://www.huo15.com' },
         db:       { type: 'string', description: '数据库名称（可选，只有一个数据库时可省略）' },
         username: { type: 'string', description: '用户名（邮箱或登录名）' },
         password: { type: 'string', description: '密码' },
@@ -231,7 +231,7 @@ function registerTools(api: OpenClawPluginApi) {
       if (!db) {
         try {
           const dbs = await OdooClient.listDatabases(params.url);
-          if (dbs.length === 0) return { success: false, message: '该 Odoo 实例没有可用的数据库' };
+          if (dbs.length === 0) return { success: false, message: '该辉火云实例没有可用的数据库' };
           if (dbs.length === 1) {
             db = dbs[0];
           } else {
@@ -246,14 +246,14 @@ function registerTools(api: OpenClawPluginApi) {
       try {
         await initOdooClient(api, cfg, aid);
         configManager.saveOdooConfig(cfg, aid);
-        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云·欧度！` };
+        return { success: true, message: `已成功连接到 ${params.url}（数据库: ${db}），欢迎使用辉火云企业套件！` };
       } catch (e) { return { success: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }; }
     },
   });
 
   api.registerTool({
     name: 'odoo_status',
-    description: '检查辉火云·欧度连接状态',
+    description: '检查辉火云企业套件连接状态',
     schema: { type: 'object', properties: {} },
     async handler(_p: unknown, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
@@ -265,7 +265,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_disconnect',
-    description: '断开辉火云·欧度连接并清除已保存的凭据。',
+    description: '断开辉火云企业套件连接并清除已保存的凭据。',
     schema: { type: 'object', properties: {} },
     async handler(_p: unknown, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
@@ -442,7 +442,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_activity_types',
-    description: '查询 Odoo 可用的活动类型列表（获取 activity_type_id）',
+    description: '查询辉火云企业套件可用的活动类型列表（获取 activity_type_id）',
     schema: { type: 'object', properties: {} },
     async handler(_p: unknown, ctx: Record<string, unknown>) {
       const client = getClient(ctx);
@@ -512,7 +512,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_send_message',
-    description: '向某条 Odoo 记录发送 chatter 消息。',
+    description: '向某条 辉火云记录发送 chatter 消息。',
     schema: {
       type: 'object',
       properties: {
@@ -539,7 +539,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_search',
-    description: '通用搜索 Odoo 任意模型。用于"查客户"、"查销售订单"、"查库存"等。',
+    description: '通用搜索辉火云企业套件任意数据模型。用于"查客户"、"查销售订单"、"查库存"等。',
     schema: {
       type: 'object',
       properties: {
@@ -1112,7 +1112,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_notification_status',
-    description: '查看 Odoo 通知总线状态：已注册的渠道 transport、订阅者数、最近一次 poll 时间、当前 agent 的偏好设置、信封溯源缓存大小。用于"通知推送情况"、"企微/钉钉有没有连上"等排查类问题。',
+    description: '查看辉火云企业套件通知总线状态：已注册的渠道 transport、订阅者数、最近一次 poll 时间、当前 agent 的偏好设置、信封溯源缓存大小。用于"通知推送情况"、"企微/钉钉有没有连上"等排查类问题。',
     schema: { type: 'object', properties: {} },
     async handler(_p: unknown, ctx: Record<string, unknown>) {
       const aid = getAgentId(ctx);
@@ -1157,7 +1157,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        title:   { type: 'string', description: '测试标题，默认"辉火云·欧度测试通知"' },
+        title:   { type: 'string', description: '测试标题，默认"辉火云企业套件测试通知"' },
         summary: { type: 'string', description: '测试摘要，默认"这是一条由 odoo 插件发送的测试通知"' },
       },
     },
@@ -1172,7 +1172,7 @@ function registerTools(api: OpenClawPluginApi) {
         kind: 'message',
         action: 'test',
         priority: 'low',
-        title: p.title ?? '辉火云·欧度测试通知',
+        title: p.title ?? '辉火云企业套件测试通知',
         summary: p.summary ?? '这是一条由 odoo 插件发送的测试通知',
         body: p.summary ?? '如果你在企微 / 钉钉 / 飞书 里看到这条，说明渠道接通正常。',
         tags: ['odoo', 'test'],
@@ -1238,7 +1238,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_notification_reply',
-    description: '手动模拟一次从渠道回到 Odoo 的入站回复 —— 渠道插件在收到用户回复后应调用这条逻辑（或直接 import notificationBus.reply）。给出 envelope_id + body，Odoo 会在对应记录的 chatter 里写一条消息。用于排查"企微回复能不能写回 Odoo"。',
+    description: '手动模拟一次从渠道回到辉火云企业套件的入站回复 —— 渠道插件在收到用户回复后应调用这条逻辑（或直接 import notificationBus.reply）。给出 envelope_id + body，辉火云会在对应记录的内部动态里写一条消息。用于排查"企微回复能不能写回系统"。',
     schema: {
       type: 'object',
       properties: {
@@ -1257,7 +1257,7 @@ function registerTools(api: OpenClawPluginApi) {
         body: p.body,
       };
       const result = await notificationBus.reply(reply);
-      return { success: result.ok, handled: result.handled, errors: result.errors, message: result.ok ? `回复已分发给 ${result.handled} 个处理器。` : '回复未能成功投递，请检查 Odoo 是否连接、envelope_id 是否在缓存中（24h 内、500 条上限）。' };
+      return { success: result.ok, handled: result.handled, errors: result.errors, message: result.ok ? `回复已分发给 ${result.handled} 个处理器。` : '回复未能成功投递，请检查辉火云企业套件是否连接、envelope_id 是否在缓存中（24h 内、500 条上限）。' };
     },
   });
 
@@ -1267,7 +1267,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_knowledge_search',
-    description: '搜索 Odoo 知识库文章。支持关键词（匹配标题或正文）、分类（workspace/private/shared）、仅收藏、仅顶层、指定父文章。用于"找一下关于 X 的知识库文章"、"列出我收藏的"、"列出工作区顶层文章"。',
+    description: '搜索 辉火云知识库文章。支持关键词（匹配标题或正文）、分类（workspace/private/shared）、仅收藏、仅顶层、指定父文章。用于"找一下关于 X 的知识库文章"、"列出我收藏的"、"列出工作区顶层文章"。',
     schema: {
       type: 'object',
       properties: {
@@ -1509,7 +1509,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_knowledge_trash',
-    description: '把文章送入回收站（或还原）。默认删除，restore=true 时恢复。Odoo 回收站里的文章在 knowledge_article_trash_limit_days（默认 30 天）后才真正删除，所以是安全操作。',
+    description: '把文章送入回收站（或还原）。默认删除，restore=true 时恢复。辉火云回收站里的文章在 knowledge_article_trash_limit_days（默认 30 天）后才真正删除，所以是安全操作。',
     schema: {
       type: 'object',
       properties: {
@@ -1540,7 +1540,7 @@ function registerTools(api: OpenClawPluginApi) {
   // ── 活动闭环 ──────────────────────────────────────────
   api.registerTool({
     name: 'odoo_complete_activity',
-    description: '完成一条活动（闭环）。调用 Odoo 原生 mail.activity.action_feedback：活动从列表移除、反馈写入源记录 chatter。用于"那个催付款的活动做完了"、"把提醒 #X 标记完成，附言：客户已转账"。',
+    description: '完成一条活动（闭环）。底层调用 mail.activity.action_feedback：活动从列表移除、反馈写入源记录内部动态。用于"那个催付款的活动做完了"、"把提醒 #X 标记完成，附言：客户已转账"。',
     schema: {
       type: 'object',
       properties: {
@@ -1593,7 +1593,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:       { type: 'string', description: 'Odoo 模型名，如 "project.task"、"crm.lead"（必填）' },
+        model:       { type: 'string', description: '数据模型名，如 "project.task"、"crm.lead"（必填）' },
         res_id:      { type: 'number', description: '记录 id（必填）' },
         partner_ids: { type: 'array', items: { type: 'number' }, description: '联系人 id 列表（可选，默认=当前用户的 partner_id）' },
       },
@@ -1615,7 +1615,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:       { type: 'string', description: 'Odoo 模型名（必填）' },
+        model:       { type: 'string', description: '数据模型名（必填）' },
         res_id:      { type: 'number', description: '记录 id（必填）' },
         partner_ids: { type: 'array', items: { type: 'number' }, description: '联系人 id 列表（可选，默认=当前用户的 partner_id）' },
       },
@@ -1706,7 +1706,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_cancel_event',
-    description: '取消（归档）日历事件：active=false。数据保留在 Odoo 不物理删除，可用 odoo_undo_last 还原。',
+    description: '取消（归档）日历事件：active=false。数据保留在系统中不物理删除，可用 odoo_undo_last 还原。',
     schema: {
       type: 'object',
       properties: { event_id: { type: 'number', description: '事件 id（必填）' } },
@@ -1731,7 +1731,7 @@ function registerTools(api: OpenClawPluginApi) {
   // ── 邮件 ──────────────────────────────────────────────
   api.registerTool({
     name: 'odoo_send_email',
-    description: '发送邮件（走 mail.mail，立即 send）。recipients 是收件人邮箱数组；body 支持 markdown（自动转 HTML）或 HTML。可选挂到某条 Odoo 记录：res_model + res_id。',
+    description: '发送邮件（走 mail.mail，立即 send）。recipients 是收件人邮箱数组；body 支持 markdown（自动转 HTML）或 HTML。可选挂到某条 辉火云记录：res_model + res_id。',
     schema: {
       type: 'object',
       properties: {
@@ -1829,12 +1829,12 @@ function registerTools(api: OpenClawPluginApi) {
   // ── 附件 / 文档 ───────────────────────────────────────
   api.registerTool({
     name: 'odoo_attach_file',
-    description: '把本地文件上传为 Odoo 附件（ir.attachment）并挂到指定记录。用于"把这份合同 PDF 附到商机 #42"。path 传本地绝对路径，插件会读文件并 base64 编码。大文件（>5MB）请走 odoo_document_upload。',
+    description: '把本地文件上传为辉火云附件（ir.attachment）并挂到指定记录。用于"把这份合同 PDF 附到商机 #42"。path 传本地绝对路径，插件会读文件并 base64 编码。大文件（>5MB）请走 odoo_document_upload。',
     schema: {
       type: 'object',
       properties: {
         path:      { type: 'string', description: '本地文件绝对路径（必填）' },
-        res_model: { type: 'string', description: 'Odoo 模型，如 "crm.lead"（必填）' },
+        res_model: { type: 'string', description: '数据模型，如 "crm.lead"（必填）' },
         res_id:    { type: 'number', description: '记录 id（必填）' },
         name:      { type: 'string', description: '附件显示名（可选，默认=文件名）' },
         mimetype:  { type: 'string', description: 'MIME 类型（可选，默认 application/octet-stream）' },
@@ -1869,7 +1869,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:  { type: 'string', description: 'Odoo 模型名（必填）' },
+        model:  { type: 'string', description: '数据模型名（必填）' },
         res_id: { type: 'number', description: '记录 id（必填）' },
         limit:  { type: 'number', description: '上限，默认 50' },
       },
@@ -1899,7 +1899,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   api.registerTool({
     name: 'odoo_document_upload',
-    description: '上传文件到 Odoo 文档应用（documents.document，Enterprise 版），可指定 folder_id 归档。用于"把这份交接文档归到项目资料夹"。附件上限 20MB。',
+    description: '上传文件到辉火云文档应用（documents.document），可指定 folder_id 归档。用于"把这份交接文档归到项目资料夹"。附件上限 20MB。',
     schema: {
       type: 'object',
       properties: {
@@ -1940,7 +1940,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:  { type: 'string', description: 'Odoo 模型名，如 "project.task"（必填）' },
+        model:  { type: 'string', description: '数据模型名，如 "project.task"（必填）' },
         ids:    { type: 'array', items: { type: 'number' }, description: '记录 id 列表（必填，至少 1 条）' },
         values: { type: 'object', description: '要写入的字段对象，如 {stage_id: 5, priority: "2"}（必填，至少 1 个字段）' },
       },
@@ -2054,7 +2054,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:          { type: 'string', description: 'Odoo 模型名（必填），如 "crm.lead"、"project.task"、"helpdesk.ticket"' },
+        model:          { type: 'string', description: '数据模型名（必填），如 "crm.lead"、"project.task"、"helpdesk.ticket"' },
         res_id:         { type: 'number', description: '记录 id（必填）' },
         body:           { type: 'string', description: '消息正文（markdown 或 HTML，必填）' },
         subject:        { type: 'string', description: '主题（可选，邮件通知时显示）' },
@@ -2088,7 +2088,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:          { type: 'string', description: 'Odoo 模型名（必填）' },
+        model:          { type: 'string', description: '数据模型名（必填）' },
         res_id:         { type: 'number', description: '记录 id（必填）' },
         body:           { type: 'string', description: '备注内容（markdown 或 HTML，必填）' },
         subject:        { type: 'string', description: '标题（可选）' },
@@ -2120,7 +2120,7 @@ function registerTools(api: OpenClawPluginApi) {
     schema: {
       type: 'object',
       properties: {
-        model:                 { type: 'string', description: 'Odoo 模型名（必填）' },
+        model:                 { type: 'string', description: '数据模型名（必填）' },
         res_id:                { type: 'number', description: '记录 id（必填）' },
         limit:                 { type: 'number', description: '上限，默认 20' },
         include_notifications: { type: 'boolean', description: 'true=包含系统通知（自动关注、阶段变更等），默认 false' },
@@ -2372,7 +2372,7 @@ function registerTools(api: OpenClawPluginApi) {
         const teamId = Array.isArray(teamRef) && typeof teamRef[0] === 'number' ? teamRef[0] : undefined;
         const closedStage = await client.findHelpdeskClosedStage(teamId);
         if (!closedStage) {
-          return { success: false, message: `团队 ${teamId ?? '(unset)'} 下找不到 fold=true 的关闭阶段。请先到 Odoo 客服应用里给这个团队建一个"已完成"阶段（fold=true）。` };
+          return { success: false, message: `团队 ${teamId ?? '(unset)'} 下找不到 fold=true 的关闭阶段。请先到辉火云客服应用里给这个团队建一个"已完成"阶段（fold=true）。` };
         }
         await loggedWrite(client, ctx, {
           tool: 'odoo_ticket_close',
@@ -2469,11 +2469,16 @@ function registerHooks(api: OpenClawPluginApi) {
     if (!client?.isAuthenticated()) {
       return {
         appendSystemContext: `
-## 辉火云·欧度（Odoo 19）插件 — 未连接
+## 辉火云企业套件插件 — 未连接
 
-插件已加载但当前用户（agent: ${aid}）尚未连接到 Odoo。当用户提到任何 ERP/Odoo 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你必须：
+> **品牌口径（硬规则）**：对外沟通时一律称"辉火云企业套件"或"辉火云"。
+> 不得出现"Odoo"、"欧度"或任何第三方 ERP 商标；内部模型名（如 project.task）
+> 和工具名（odoo_xxx）是技术标识符，仅在调试说明里出现，不要在面向用户的
+> 正文里直接朗读。
 
-1. 告诉用户需要先连接辉火云·欧度
+插件已加载但当前用户（agent: ${aid}）尚未连接到辉火云企业套件。当用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你必须：
+
+1. 告诉用户需要先连接辉火云企业套件
 2. 依次询问以下信息：
    - **公司系统地址**（URL）：例如 https://www.huo15.com
    - **用户名**（邮箱或登录名）
@@ -2482,14 +2487,19 @@ function registerHooks(api: OpenClawPluginApi) {
 4. 收集到 URL、用户名、密码后，立即调用 **odoo_connect**（不传 db 参数）
 5. 连接成功后凭据会自动保存，下次使用无需重新输入
 
-示例引导话术："要使用辉火云·欧度，需要先连接您公司的系统。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
+示例引导话术："要使用辉火云企业套件，需要先连接您公司的系统。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
       };
     }
 
     const info = client.getSessionInfo();
     return {
       appendSystemContext: `
-## 辉火云·欧度（Odoo 19）已连接
+## 辉火云企业套件 已连接
+
+> **品牌口径（硬规则）**：对外沟通时一律称"辉火云企业套件"或"辉火云"。
+> 不得出现"Odoo"、"欧度"或任何第三方 ERP 商标。工具名（odoo_*）和技术模型名
+> （如 project.task）仅在调试说明里出现，面向用户的正文请用中文业务术语
+> （"任务"/"商机"/"工单"/"内部动态"而非"chatter"等）。
 
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
@@ -2554,7 +2564,7 @@ function registerHooks(api: OpenClawPluginApi) {
 | 测试一下通知推送 | **odoo_notification_test** |
 | 列出已接入的渠道 | **odoo_notification_channels** |
 | 关闭通知 / 别发待办了 / 夜里静音 / 只接收紧急 | **odoo_notification_prefs** |
-| 模拟一次企微/钉钉回复写回 Odoo | **odoo_notification_reply** |
+| 模拟一次企微/钉钉回复写回系统 | **odoo_notification_reply** |
 | 找一下关于 X 的知识库文章 / 搜知识库 | **odoo_knowledge_search** |
 | 把这篇文章读给我 / 文章 #X 写了什么 | **odoo_knowledge_read** |
 | 新建知识库文章 / 记一下这个到知识库 | **odoo_knowledge_create** |
@@ -2593,7 +2603,7 @@ function registerHooks(api: OpenClawPluginApi) {
 | 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
-### Odoo 常用模型
+### 常用数据模型（技术内部标识，不在正文中朗读）
 project.task · project.project · project.milestone · mail.activity · calendar.event ·
 crm.lead · crm.stage · sale.order · purchase.order · helpdesk.ticket · account.move ·
 res.partner · hr.employee · hr.leave · hr.attendance · stock.quant · stock.picking ·
@@ -2614,13 +2624,13 @@ mail.template · mail.mail · mail.followers · ir.attachment · documents.docum
   api.logger.info('[odoo] before_prompt_build 钩子已注册（per-agent 隔离）');
 }
 
-// ── 处理 Odoo 更新通知 ────────────────────────────────────────────────────────
+// ── 处理后端更新通知 ──────────────────────────────────────────────────────────
 /**
- * Odoo 事件 → NotificationEnvelope → 全局通知总线
+ * 辉火云企业套件事件 → NotificationEnvelope → 全局通知总线
  *
  * 流程：
  *   1. 应用 per-agent 偏好（enabled / kinds / minPriority / quietHours）
- *   2. 缓存 envelope 溯源信息（供入站回复时定位 Odoo 记录）
+ *   2. 缓存 envelope 溯源信息（供入站回复时定位 辉火云记录）
  *   3. publish 到 bus，渠道插件决定投递细节
  *
  * 本方法不感知具体渠道。
@@ -2664,7 +2674,7 @@ function handleOdooUpdates(api: OpenClawPluginApi, updates: SyncUpdate[], aid: s
   );
 }
 
-// ── 处理入站回复（渠道 → Odoo chatter）──────────────────────────────────────
+// ── 处理入站回复（渠道 → 辉火云内部动态）──────────────────────────────────────
 async function handleInboundReply(api: OpenClawPluginApi, reply: InboundReply): Promise<void> {
   const origin = envelopeCache.get(reply.envelopeId);
   if (!origin) {
@@ -2698,7 +2708,7 @@ async function handleInboundReply(api: OpenClawPluginApi, reply: InboundReply): 
     }]);
     api.logger.info(`[odoo] 入站回复已写入 ${origin.model}#${origin.resId}（mail.message ${String(id)}）`);
   } catch (e) {
-    api.logger.error(`[odoo] 写回 Odoo chatter 失败: ${e instanceof Error ? e.message : String(e)}`);
+    api.logger.error(`[odoo] 写回辉火云内部动态失败: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

@@ -29,7 +29,7 @@ function truncate(s: string, n: number): string {
 
 function odooLink(odooUrl: string | undefined, model: string, id: number): { url: string; label?: string } | undefined {
   if (!odooUrl) return undefined;
-  return { url: `${odooUrl.replace(/\/$/, '')}/odoo/action-base.action_open_view?model=${encodeURIComponent(model)}&id=${id}`, label: '在 Odoo 中打开' };
+  return { url: `${odooUrl.replace(/\/$/, '')}/odoo/action-base.action_open_view?model=${encodeURIComponent(model)}&id=${id}`, label: '在辉火云中打开' };
 }
 
 /**
@@ -134,8 +134,8 @@ export function toEnvelope(
         action: update.action,
         priority: 'normal',
         title: '新邮件通知',
-        summary: `您有一条新的 Odoo 邮件通知（id=${update.id}）`,
-        body: `Odoo 邮件通知\nnotification_id: ${update.id}`,
+        summary: `您有一条新的辉火云邮件通知（id=${update.id}）`,
+        body: `辉火云邮件通知\nnotification_id: ${update.id}`,
         tags: ['odoo', 'email'],
         createdAt,
         origin: { url: odooUrl, model: 'mail.notification', resId: update.id },
