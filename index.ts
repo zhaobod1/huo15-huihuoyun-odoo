@@ -1508,6 +1508,323 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // HR 行动力补完（v1.12 新增 14 个）
+  //   工资单 3 + 考核 1 + 招聘 3 + 排班 2 + 技能 3 + 远程 1 + 车队 1
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 工资单生命周期（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_payslip_validate',
+    description: '【HR/财务】验证工资单（hr.payslip.action_payslip_done），状态从 draft → done。需要 hr_payroll.group_hr_payroll_user 权限。批量传 ids。',
+    schema: {
+      type: 'object',
+      properties: { payslip_ids: { type: 'array', items: { type: 'number' }, description: '工资单 id 数组（必填）' } },
+      required: ['payslip_ids'],
+    },
+    async handler(p: { payslip_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.validatePayslip(p.payslip_ids);
+        return { success: true, message: `工资单 ${p.payslip_ids.map(i => '#'+i).join(', ')} 已验证（draft → done）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_payslip_paid',
+    description: '【HR/财务】标记工资单已支付（hr.payslip.action_payslip_paid），状态从 done → paid。需要 hr_payroll.group_hr_payroll_user 权限。',
+    schema: {
+      type: 'object',
+      properties: { payslip_ids: { type: 'array', items: { type: 'number' }, description: '工资单 id 数组（必填）' } },
+      required: ['payslip_ids'],
+    },
+    async handler(p: { payslip_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.markPayslipPaid(p.payslip_ids);
+        return { success: true, message: `工资单 ${p.payslip_ids.map(i => '#'+i).join(', ')} 已标记为已支付。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_payslip_cancel',
+    description: '【HR】取消工资单（hr.payslip.action_payslip_cancel），任何状态 → cancel。',
+    schema: {
+      type: 'object',
+      properties: { payslip_ids: { type: 'array', items: { type: 'number' }, description: '工资单 id 数组（必填）' } },
+      required: ['payslip_ids'],
+    },
+    async handler(p: { payslip_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.cancelPayslip(p.payslip_ids);
+        return { success: true, message: `工资单 ${p.payslip_ids.map(i => '#'+i).join(', ')} 已取消。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 考核闭环（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_appraisal_action',
+    description: '推进绩效考核状态（hr.appraisal）。action="confirm" 启动（1_new→2_pending）；"done" 完成（2_pending→3_done）；"back" 退回草稿。',
+    schema: {
+      type: 'object',
+      properties: {
+        appraisal_id: { type: 'number', description: '考核 id（必填）' },
+        action:       { type: 'string', enum: ['confirm', 'done', 'back'], description: '动作（必填）' },
+      },
+      required: ['appraisal_id', 'action'],
+    },
+    async handler(p: { appraisal_id: number; action: 'confirm' | 'done' | 'back' }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.appraisalAction(p.appraisal_id, p.action);
+        const labelMap = { confirm: '已启动', done: '已完成', back: '已退回草稿' };
+        return { success: true, message: `考核 #${p.appraisal_id} ${labelMap[p.action]}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 招聘助手（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_recruitment_stages',
+    description: '查询招聘阶段列表（hr.recruitment.stage）。给 odoo_applicant_move_stage 提供 stage_id。可按 job_id 筛选只属于某岗位的阶段。',
+    schema: {
+      type: 'object',
+      properties: { job_id: { type: 'number', description: '岗位 id 筛选（可选）' } },
+    },
+    async handler(p: { job_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const stages = await client.getRecruitmentStages(p.job_id);
+        return { success: true, count: stages.length, stages: stages.map(s => ({
+          id: s['id'], name: s['name'], sequence: s['sequence'],
+          hired_stage: s['hired_stage'], fold: s['fold'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_recruitment_refuse_reasons',
+    description: '查询拒绝候选人的理由列表（hr.applicant.refuse.reason）。给 odoo_applicant_move_stage 的 refuse_reason_id 提供选项。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const reasons = await client.getApplicantRefuseReasons();
+        return { success: true, count: reasons.length, refuse_reasons: reasons.map(r => ({ id: r['id'], name: r['name'] })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_recruitment_create_meeting',
+    description: '为应聘者创建面试日历事件（calendar.event + applicant_id）。会自动把应聘者的 partner 和招聘官 partner 加为参会人；如果应聘者还没 partner_id 会自动建一个。start 是 YYYY-MM-DD HH:MM:SS，duration 单位为小时（默认 1）。',
+    schema: {
+      type: 'object',
+      properties: {
+        applicant_id: { type: 'number', description: '应聘者 id（必填）' },
+        name:         { type: 'string', description: '会议标题，如"华为 ERP 项目岗位 - 一面"（必填）' },
+        start:        { type: 'string', description: '开始时间 YYYY-MM-DD HH:MM:SS（必填，UTC 或本地，按 Odoo 时区设置）' },
+        duration:     { type: 'number', description: '时长（小时），默认 1' },
+        description:  { type: 'string', description: '会议说明' },
+      },
+      required: ['applicant_id', 'name', 'start'],
+    },
+    async handler(p: { applicant_id: number; name: string; start: string; duration?: number; description?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createApplicantMeeting(p.applicant_id, {
+          name: p.name, start: p.start, duration: p.duration, description: p.description,
+        });
+        return { success: true, id, message: `面试事件 #${id} 已为候选人 #${p.applicant_id} 创建（${p.start}，${p.duration ?? 1}h）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 排班发布 / 取消发布（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_planning_publish',
+    description: '发布排班 / 班次（planning.slot）。notify=true（默认）会逐条调 action_send 自动给员工发邮件并置为 published；notify=false 则只 write state="published" 不发通知。',
+    schema: {
+      type: 'object',
+      properties: {
+        shift_ids: { type: 'array', items: { type: 'number' }, description: '排班 id 数组（必填）' },
+        notify:    { type: 'boolean', description: '是否邮件通知员工，默认 true' },
+      },
+      required: ['shift_ids'],
+    },
+    async handler(p: { shift_ids: number[]; notify?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.publishPlanningShift(p.shift_ids, p.notify !== false);
+        const tag = p.notify !== false ? '已发布并通知员工' : '已发布（未发通知）';
+        return { success: true, message: `排班 ${p.shift_ids.map(i => '#'+i).join(', ')} ${tag}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_planning_unpublish',
+    description: '【planning manager】取消发布排班，published → draft（planning.slot.action_unpublish）。需要 planning.group_planning_manager 权限。',
+    schema: {
+      type: 'object',
+      properties: { shift_ids: { type: 'array', items: { type: 'number' }, description: '排班 id 数组（必填）' } },
+      required: ['shift_ids'],
+    },
+    async handler(p: { shift_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.unpublishPlanningShift(p.shift_ids);
+        return { success: true, message: `排班 ${p.shift_ids.map(i => '#'+i).join(', ')} 已取消发布（回到 draft）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 技能管理（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_employee_skills',
+    description: '查询员工技能列表（hr.employee.skill）。不填 employee_id 默认查当前用户；可按 skill_type_id 筛某类技能（如"编程语言"、"语言"）。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:   { type: 'number', description: '员工 id，不填默认当前用户' },
+        skill_type_id: { type: 'number', description: '技能类型 id 筛选' },
+        limit:         { type: 'number', description: '上限，默认50' },
+      },
+    },
+    async handler(p: { employee_id?: number; skill_type_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const skills = await client.getEmployeeSkills(p);
+        return { success: true, count: skills.length, employee_skills: skills.map(s => ({
+          id: s['id'], employee: s['employee_id'], skill: s['skill_id'],
+          skill_type: s['skill_type_id'], level: s['skill_level_id'], progress: s['level_progress'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_employee_skill_add',
+    description: '给员工添加一项技能（hr.employee.skill）。需要 hr.group_hr_user 权限（员工自己也可以加自己的）。先用 odoo_skills_catalog 查 skill_type_id / skill_id / skill_level_id。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:    { type: 'number', description: '员工 id（必填）' },
+        skill_type_id:  { type: 'number', description: '技能类型 id（必填，如"编程语言"）' },
+        skill_id:       { type: 'number', description: '技能 id（必填，如"Python"）' },
+        skill_level_id: { type: 'number', description: '技能等级 id（必填，如"高级"）' },
+      },
+      required: ['employee_id', 'skill_type_id', 'skill_id', 'skill_level_id'],
+    },
+    async handler(p: { employee_id: number; skill_type_id: number; skill_id: number; skill_level_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.addEmployeeSkill(p);
+        return { success: true, id, message: `已为员工 #${p.employee_id} 添加技能 #${p.skill_id}（等级 #${p.skill_level_id}），记录 #${id}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_skills_catalog',
+    description: '查询技能目录（hr.skill / hr.skill.type / hr.skill.level）。一次返回三类 master data 给上层调用方（odoo_employee_skill_add）拼参数用。可按 skill_type_id / keyword 筛选。',
+    schema: {
+      type: 'object',
+      properties: {
+        skill_type_id: { type: 'number', description: '只看某类技能下的 skill 和 level' },
+        keyword:       { type: 'string', description: '技能名模糊搜索' },
+        limit:         { type: 'number', description: 'skills 列表上限，默认50' },
+      },
+    },
+    async handler(p: { skill_type_id?: number; keyword?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const cat = await client.getSkillsCatalog(p);
+        return {
+          success: true,
+          skill_types: cat.skill_types.map(t => ({ id: t['id'], name: t['name'] })),
+          skills: cat.skills.map(s => ({ id: s['id'], name: s['name'], type: s['skill_type_id'] })),
+          skill_levels: cat.skill_levels.map(l => ({ id: l['id'], name: l['name'], progress: l['level_progress'], type: l['skill_type_id'] })),
+        };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 远程办公（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_homeworking_set',
+    description: '设置员工某天的工作地点（hr.employee.location，hr_homeworking 模块）。用于"明天我远程"、"周一到周三在家办公"。同一员工同一天唯一约束，已有则覆盖。先用 odoo_search(model="hr.work.location") 查可选地点 id。',
+    schema: {
+      type: 'object',
+      properties: {
+        date:             { type: 'string', description: '日期 YYYY-MM-DD（必填）' },
+        work_location_id: { type: 'number', description: 'hr.work.location id（必填，如"家"、"上海办公室"）' },
+        employee_id:      { type: 'number', description: '员工 id，不填默认当前用户' },
+      },
+      required: ['date', 'work_location_id'],
+    },
+    async handler(p: { date: string; work_location_id: number; employee_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.setHomeworking(p);
+        return { success: true, id, message: `已设置 ${p.date} 的工作地点为 location #${p.work_location_id}（hr.employee.location #${id}）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 车队（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_fleet_vehicles',
+    description: '查询公司车辆（fleet.vehicle）。用于"我有哪辆车"、"销售部的车"、"X 公司车队"。driver_user_id 按司机 res.users id 筛选；keyword 匹配车名/车牌。',
+    schema: {
+      type: 'object',
+      properties: {
+        driver_user_id: { type: 'number', description: '司机 res.users id 筛选' },
+        keyword:        { type: 'string', description: '车辆名 / 车牌模糊搜索' },
+        only_active:    { type: 'boolean', description: '只看活跃，默认 true' },
+        limit:          { type: 'number', description: '上限，默认30' },
+      },
+    },
+    async handler(p: { driver_user_id?: number; keyword?: string; only_active?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const vehicles = await client.getFleetVehicles(p);
+        return { success: true, count: vehicles.length, vehicles: vehicles.map(v => ({
+          id: v['id'], name: v['name'], plate: v['license_plate'], model: v['model_id'],
+          driver: v['driver_id'], acquired: v['acquisition_date'],
+          odometer: v['odometer'], odometer_unit: v['odometer_unit'],
+          state: v['state_id'], company: v['company_id'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -2908,7 +3225,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 91 个工具已注册（v1.11 — HR 闭环：请假/报销/招聘/考核/工资/排班）');
+  api.logger.info('[odoo] 105 个工具已注册（v1.12 — HR 行动力补完：工资单生命周期/考核动作/招聘助手/排班发布/技能管理/远程办公/车队）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -3001,8 +3318,9 @@ function registerHooks(api: OpenClawPluginApi) {
 **HR 基础** ：odoo_employees · odoo_leaves · odoo_attendances
 **HR 请假闭环（v1.11）**：odoo_leave_types · odoo_leave_create · odoo_leave_approve · odoo_leave_refuse · odoo_leave_allocate
 **HR 报销闭环（v1.11）**：odoo_expenses · odoo_expense_create · odoo_expense_submit · odoo_expense_approve
-**HR 招聘（v1.11）**：odoo_applicants · odoo_applicant_move_stage
-**HR 考核/工资/排班（v1.11）**：odoo_appraisals · odoo_payslips · odoo_planning_shifts
+**HR 招聘（v1.11+v1.12）**：odoo_applicants · odoo_applicant_move_stage · odoo_recruitment_stages · odoo_recruitment_refuse_reasons · odoo_recruitment_create_meeting
+**HR 考核/工资/排班（v1.11+v1.12）**：odoo_appraisals · odoo_appraisal_action · odoo_payslips · odoo_payslip_validate · odoo_payslip_paid · odoo_payslip_cancel · odoo_planning_shifts · odoo_planning_publish · odoo_planning_unpublish
+**HR 技能/远程/车队（v1.12）**：odoo_employee_skills · odoo_employee_skill_add · odoo_skills_catalog · odoo_homeworking_set · odoo_fleet_vehicles
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -3092,9 +3410,23 @@ function registerHooks(api: OpenClawPluginApi) {
 | 批了这条报销 / 拒绝报销 / 通过 X 的报销 | **odoo_expense_approve** |
 | 招聘 pipeline / 候选人列表 / 某岗位有谁 | **odoo_applicants** |
 | 把候选人推到面试 / 移动应聘者阶段 / 拒绝候选人 | **odoo_applicant_move_stage** |
+| 招聘有哪些阶段 / 列出招聘 stage | **odoo_recruitment_stages** |
+| 拒绝候选人有哪些理由 / 拒绝原因列表 | **odoo_recruitment_refuse_reasons** |
+| 约这位候选人面试 / 给应聘者排个面试 | **odoo_recruitment_create_meeting** |
 | 看考核 / 我要做的绩效 / 待评的人 | **odoo_appraisals** |
+| 启动 / 完成 / 退回考核 | **odoo_appraisal_action** |
 | 我的工资单 / 这个月工资 / 看薪资 | **odoo_payslips** |
+| 验证工资单 / 工资单 done | **odoo_payslip_validate** |
+| 工资发了 / 工资单标记已支付 | **odoo_payslip_paid** |
+| 取消工资单 / 作废 | **odoo_payslip_cancel** |
 | 我这周的班 / 排班 / 谁今天值班 | **odoo_planning_shifts** |
+| 发布排班 / 公布班次 / 通知员工值班 | **odoo_planning_publish** |
+| 撤销排班发布 / 班次回到草稿 | **odoo_planning_unpublish** |
+| 看某员工的技能 / 我会什么 / 部门技能盘点 | **odoo_employee_skills** |
+| 给员工加技能 / 录入技能等级 | **odoo_employee_skill_add** |
+| 系统里有哪些技能 / 技能等级目录 | **odoo_skills_catalog** |
+| 我明天远程 / 标记某天在家办公 / 周一在上海办公室 | **odoo_homeworking_set** |
+| 我有哪辆车 / 公司车队 / 销售部的车 | **odoo_fleet_vehicles** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 

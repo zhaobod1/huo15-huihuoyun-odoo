@@ -1316,6 +1316,221 @@ export class OdooClient {
     return result.records;
   }
 
+  // ==================== HR 行动力补完（v1.12） ====================
+  //
+  // v1.12 把 v1.11 中只读的几个 HR 域升级到完整 action 闭环：
+  //   - hr.payslip 工资单生命周期：validate → paid → cancel
+  //   - hr.appraisal 考核：confirm → done → back
+  //   - hr.recruitment.stage / hr.applicant.refuse.reason：master data 查询
+  //   - hr.applicant.action_create_meeting：创建面试日历事件
+  //   - planning.slot publish/unpublish：排班发布/取消发布
+  // 以及新增三个 HR 域：
+  //   - hr.employee.skill / hr.skill[.type|.level]：员工技能管理
+  //   - hr.employee.location（hr_homeworking 模块）：远程办公地点
+  //   - fleet.vehicle：员工车辆
+
+  // ---------- 工资单生命周期 ----------
+
+  async validatePayslip(ids: number[]): Promise<unknown> {
+    // draft → done。需要 hr_payroll.group_hr_payroll_user
+    return this.call('hr.payslip', 'action_payslip_done', [ids]);
+  }
+
+  async markPayslipPaid(ids: number[]): Promise<unknown> {
+    // done → paid。需要 hr_payroll.group_hr_payroll_user
+    return this.call('hr.payslip', 'action_payslip_paid', [ids]);
+  }
+
+  async cancelPayslip(ids: number[]): Promise<unknown> {
+    // any → cancel。需要 hr_payroll.group_hr_payroll_user
+    return this.call('hr.payslip', 'action_payslip_cancel', [ids]);
+  }
+
+  // ---------- 招聘助手 ----------
+
+  async createApplicantMeeting(applicantId: number, values: {
+    name: string;
+    start: string;                   // YYYY-MM-DD HH:MM:SS
+    duration?: number;               // 小时，默认 1
+    description?: string;
+  }): Promise<number> {
+    // 通过创建 calendar.event 来"约面试"，把 default_applicant_id 填到上下文
+    // 比直接调 action_create_meeting（返回 act_window dict）更适合工具化调用
+    const app = (await this.read('hr.applicant', [applicantId],
+      ['id', 'partner_name', 'partner_id', 'email_from', 'user_id', 'department_id']))[0];
+    if (!app) throw new Error(`未找到应聘者 #${applicantId}`);
+
+    // 自动建一个联系人（如果没有）
+    let partnerId = Array.isArray(app['partner_id']) ? app['partner_id'][0] as number : null;
+    if (!partnerId && app['partner_name']) {
+      partnerId = await this.create('res.partner', {
+        name: app['partner_name'],
+        is_company: false,
+        email: app['email_from'] ?? false,
+      });
+      // 回写到 applicant
+      await this.write('hr.applicant', [applicantId], { partner_id: partnerId });
+    }
+
+    const partnerIds: number[] = [];
+    if (partnerId) partnerIds.push(partnerId);
+    const recruiter = Array.isArray(app['user_id']) ? app['user_id'][0] as number : null;
+    if (recruiter) {
+      const recruiterUser = (await this.read('res.users', [recruiter], ['partner_id']))[0];
+      const rPartner = Array.isArray(recruiterUser?.['partner_id']) ? recruiterUser['partner_id'][0] as number : null;
+      if (rPartner && !partnerIds.includes(rPartner)) partnerIds.push(rPartner);
+    }
+
+    const duration = values.duration ?? 1;
+    const startDate = new Date(values.start.replace(' ', 'T') + 'Z');
+    const endDate = new Date(startDate.getTime() + duration * 60 * 60 * 1000);
+    const stop = endDate.toISOString().substring(0, 19).replace('T', ' ');
+
+    const eventValues: Record<string, unknown> = {
+      name: values.name,
+      start: values.start,
+      stop,
+      duration,
+      partner_ids: [[6, 0, partnerIds]],
+      applicant_id: applicantId,
+    };
+    if (values.description) eventValues['description'] = values.description;
+    return this.create('calendar.event', eventValues);
+  }
+
+  // ---------- 排班发布 / 取消发布 ----------
+
+  async publishPlanningShift(ids: number[], notify: boolean = true): Promise<unknown> {
+    // 简单地写 state='published'；如需通知员工，逐条调 action_send
+    if (notify) {
+      // action_send 会按 employee_id 发邮件 + 自动写 state='published'
+      const results: unknown[] = [];
+      for (const id of ids) {
+        try { results.push(await this.call('planning.slot', 'action_send', [[id]])); }
+        catch (e) { results.push({ error: String(e), id }); }
+      }
+      return results;
+    }
+    return this.write('planning.slot', ids, { state: 'published' });
+  }
+
+  async unpublishPlanningShift(ids: number[]): Promise<unknown> {
+    // 需要 planning.group_planning_manager
+    return this.call('planning.slot', 'action_unpublish', [ids]);
+  }
+
+  // ---------- 技能管理 ----------
+
+  async getEmployeeSkills(options: {
+    employee_id?: number;
+    skill_type_id?: number;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    if (options.skill_type_id) domain.push(['skill_type_id', '=', options.skill_type_id]);
+    const result = await this.searchRead('hr.employee.skill', domain,
+      ['id', 'employee_id', 'skill_id', 'skill_type_id', 'skill_level_id', 'level_progress'],
+      { limit: options.limit ?? 50, order: 'skill_type_id, skill_id' });
+    return result.records;
+  }
+
+  async addEmployeeSkill(values: {
+    employee_id: number;
+    skill_type_id: number;
+    skill_id: number;
+    skill_level_id: number;
+  }): Promise<number> {
+    return this.create('hr.employee.skill', {
+      employee_id: values.employee_id,
+      skill_type_id: values.skill_type_id,
+      skill_id: values.skill_id,
+      skill_level_id: values.skill_level_id,
+    });
+  }
+
+  async getSkillsCatalog(options: {
+    keyword?: string;
+    skill_type_id?: number;
+    limit?: number;
+  } = {}): Promise<{
+    skill_types: OdooRecord[];
+    skills: OdooRecord[];
+    skill_levels: OdooRecord[];
+  }> {
+    const skillDomain: Domain = [];
+    if (options.skill_type_id) skillDomain.push(['skill_type_id', '=', options.skill_type_id]);
+    if (options.keyword) skillDomain.push(['name', 'ilike', options.keyword]);
+    const [skillTypes, skills, levels] = await Promise.all([
+      this.searchRead('hr.skill.type', [], ['id', 'name'], { limit: 30, order: 'name asc' }),
+      this.searchRead('hr.skill', skillDomain, ['id', 'name', 'skill_type_id'],
+        { limit: options.limit ?? 50, order: 'skill_type_id, name asc' }),
+      this.searchRead('hr.skill.level', [], ['id', 'name', 'level_progress', 'skill_type_id'],
+        { limit: 60, order: 'skill_type_id, level_progress asc' }),
+    ]);
+    return {
+      skill_types: skillTypes.records,
+      skills: skills.records,
+      skill_levels: levels.records,
+    };
+  }
+
+  // ---------- 远程办公（hr_homeworking） ----------
+
+  async setHomeworking(values: {
+    employee_id?: number;            // 不填默认为当前用户的员工
+    date: string;                    // YYYY-MM-DD
+    work_location_id: number;        // hr.work.location id（办公室/家/其他）
+  }): Promise<number> {
+    // hr.employee.location 有 unique(employee_id, date) 约束
+    // 已存在则更新，没有则创建
+    const empId = values.employee_id ?? await this._getCurrentEmployeeId();
+    const existing = await this.searchRead('hr.employee.location',
+      [['employee_id', '=', empId], ['date', '=', values.date]],
+      ['id'], { limit: 1 });
+    if (existing.records.length > 0) {
+      const id = existing.records[0]?.['id'] as number;
+      await this.write('hr.employee.location', [id], { work_location_id: values.work_location_id });
+      return id;
+    }
+    return this.create('hr.employee.location', {
+      employee_id: empId,
+      date: values.date,
+      work_location_id: values.work_location_id,
+    });
+  }
+
+  private async _getCurrentEmployeeId(): Promise<number> {
+    const users = await this.read('res.users', [this.uid ?? 0], ['employee_id']);
+    const empField = users[0]?.['employee_id'];
+    if (Array.isArray(empField) && typeof empField[0] === 'number') return empField[0];
+    throw new Error('当前用户没有关联员工记录（res.users.employee_id 为空）');
+  }
+
+  // ---------- 车队 ----------
+
+  async getFleetVehicles(options: {
+    driver_user_id?: number;         // 按司机的 res.users id 筛
+    employee_id?: number;
+    keyword?: string;
+    only_active?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    if (options.driver_user_id) {
+      // driver_id 是 Many2one('res.partner')，所以要过 res.users.partner_id 联表
+      domain.push(['driver_id.user_ids', 'in', [options.driver_user_id]]);
+    }
+    if (options.keyword) domain.push('|', ['name', 'ilike', options.keyword], ['license_plate', 'ilike', options.keyword]);
+    const result = await this.searchRead('fleet.vehicle', domain,
+      ['id', 'name', 'license_plate', 'model_id', 'driver_id', 'acquisition_date',
+       'odometer', 'odometer_unit', 'state_id', 'company_id'],
+      { limit: options.limit ?? 30, order: 'name asc' });
+    return result.records;
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

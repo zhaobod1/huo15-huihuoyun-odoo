@@ -1,7 +1,7 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.11.0",
-  "description": "火一五·辉火云企业套件插件 — 自然语言操作辉火云企业套件，实施经理 + HR 助手，91 个工具覆盖任务、活动闭环、日历、邮件（含模板）、内部动态 chatter、附件/文档、关注者、CRM、项目/里程碑治理、工单闭环（改/关/派）、审批通过/拒绝、财务、销售、知识库、批量更新、撤销；v1.10 共享凭据（组织内配一次，全员跨渠道复用）；v1.11 HR 闭环：请假申请/审批/拒绝/HR 分配额度、报销创建/提交/审批/拒绝、招聘 pipeline 查询/移动阶段、绩效考核、工资单查询、排班/班次查询",
+  "version": "1.12.0",
+  "description": "火一五·辉火云企业套件插件 — 自然语言操作辉火云企业套件，实施经理 + HR 全闭环助手，105 个工具覆盖任务、活动、日历、邮件、chatter、附件、CRM、项目/里程碑、工单、审批、财务、销售、知识库、批量更新、撤销；v1.10 共享凭据；v1.11 HR 闭环（请假/报销/招聘/考核/工资/排班）；v1.12 HR 行动力补完：工资单 validate/paid/cancel + 考核 confirm/done/back + 招聘 stages/refuse_reasons/create_meeting + 排班 publish/unpublish + 员工技能（hr_skills）+ 远程办公（hr_homeworking）+ 公司车队（fleet）",
   "type": "module",
   "main": "index.ts",
   "openclaw": {
