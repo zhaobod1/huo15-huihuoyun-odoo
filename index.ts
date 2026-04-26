@@ -1825,6 +1825,346 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // HR 全生命周期治理（v1.13 新增 14 个）
+  //   员工 CRUD 4 + 仪表盘 1 + 部门/岗位/地点 5 + 合同版本 1 + 工时洞察 2 + 组织架构 1
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 员工 CRUD（4 个） ----------
+
+  api.registerTool({
+    name: 'odoo_employee_create',
+    description: '【HR】创建员工（hr.employee）。用于"入职新员工"、"录入张三"。需要 hr.group_hr_user 权限。Odoo 会按 name 自动建 resource.resource。建议同步填 work_email、department_id、job_id。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:             { type: 'string', description: '员工姓名（必填）' },
+        work_email:       { type: 'string', description: '工作邮箱' },
+        work_phone:       { type: 'string', description: '工作座机' },
+        mobile_phone:     { type: 'string', description: '工作手机' },
+        job_title:        { type: 'string', description: '职位名称（自由文本）' },
+        department_id:    { type: 'number', description: 'hr.department id' },
+        job_id:           { type: 'number', description: 'hr.job id（招聘岗位）' },
+        parent_id:        { type: 'number', description: '上级 hr.employee id' },
+        coach_id:         { type: 'number', description: '导师 hr.employee id' },
+        user_id:          { type: 'number', description: '关联的 res.users id（系统账号）' },
+        work_location_id: { type: 'number', description: 'hr.work.location id' },
+        company_id:       { type: 'number', description: '公司 id' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; work_email?: string; work_phone?: string; mobile_phone?: string; job_title?: string; department_id?: number; job_id?: number; parent_id?: number; coach_id?: number; user_id?: number; work_location_id?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createEmployee(p);
+        return { success: true, id, message: `员工 #${id}（${p.name}）已创建。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_employee_update',
+    description: '【HR】修改员工资料（hr.employee.write）。用于"改张三的部门"、"换上级"、"加手机号"等。多字段一次更新。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:      { type: 'number', description: '员工 id（必填）' },
+        name:             { type: 'string' },
+        work_email:       { type: 'string' },
+        work_phone:       { type: 'string' },
+        mobile_phone:     { type: 'string' },
+        job_title:        { type: 'string' },
+        department_id:    { type: 'number' },
+        job_id:           { type: 'number' },
+        parent_id:        { type: 'number' },
+        coach_id:         { type: 'number' },
+        user_id:          { type: 'number' },
+        work_location_id: { type: 'number' },
+      },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number; [k: string]: unknown }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const { employee_id, ...rest } = p;
+        if (Object.keys(rest).length === 0) return { success: false, message: '没有要更新的字段' };
+        await client.updateEmployee(employee_id, rest);
+        return { success: true, message: `员工 #${employee_id} 已更新（${Object.keys(rest).join(', ')}）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_employee_archive',
+    description: '【HR】归档员工（active=false），用于"离职"、"停用 X 的账号"。员工不会被删除，可通过 odoo_employee_unarchive 恢复。',
+    schema: {
+      type: 'object',
+      properties: { employee_id: { type: 'number', description: '员工 id（必填）' } },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.archiveEmployee(p.employee_id);
+        return { success: true, message: `员工 #${p.employee_id} 已归档（离职）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_employee_unarchive',
+    description: '【HR】恢复已归档员工（active=true），用于"返聘"、"重新启用账号"。',
+    schema: {
+      type: 'object',
+      properties: { employee_id: { type: 'number', description: '员工 id（必填）' } },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.unarchiveEmployee(p.employee_id);
+        return { success: true, message: `员工 #${p.employee_id} 已恢复（active=true）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- HR 仪表盘（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_hr_dashboard',
+    description: '【HR/管理】一句话拿到 HR 全局仪表盘：在编人数 + 部门人数分布 + 今日生日 + 今日请假人 + 待审请假/报销数 + 招聘漏斗 + 在招岗位数。read_group 聚合，单次调用全图。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const dash = await client.getHrDashboard();
+        return { success: true, ...dash };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 部门 / 岗位 / 工作地点（5 个） ----------
+
+  api.registerTool({
+    name: 'odoo_departments',
+    description: '查询部门列表（hr.department）。complete_name 字段含完整层级（如"销售/华北销售/北京组"）。可按父部门 / keyword 筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:   { type: 'string', description: '部门名模糊搜索' },
+        parent_id: { type: 'number', description: '父部门 id（传 0 表示顶级部门）' },
+        limit:     { type: 'number', description: '上限，默认100' },
+      },
+    },
+    async handler(p: { keyword?: string; parent_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const depts = await client.getDepartments(p);
+        return { success: true, count: depts.length, departments: depts.map(d => ({
+          id: d['id'], name: d['name'], full_path: d['complete_name'],
+          parent: d['parent_id'], manager: d['manager_id'],
+          member_count: Array.isArray(d['member_ids']) ? d['member_ids'].length : 0,
+          company: d['company_id'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_department_create',
+    description: '【HR】创建部门（hr.department）。parent_id 不填则为顶级；manager_id 是部门经理 hr.employee.id。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:       { type: 'string', description: '部门名（必填）' },
+        parent_id:  { type: 'number', description: '上级部门 id' },
+        manager_id: { type: 'number', description: '部门经理 hr.employee id' },
+        company_id: { type: 'number', description: '公司 id' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; parent_id?: number; manager_id?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createDepartment(p);
+        return { success: true, id, message: `部门 #${id}（${p.name}）已创建。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_jobs',
+    description: '查询岗位列表（hr.job）。可按部门筛。expected_employees 是该岗位的预期 / 已招人数。',
+    schema: {
+      type: 'object',
+      properties: {
+        department_id: { type: 'number', description: '部门 id 筛选' },
+        only_active:   { type: 'boolean', description: '只看活跃，默认 true' },
+        limit:         { type: 'number', description: '上限，默认100' },
+      },
+    },
+    async handler(p: { department_id?: number; only_active?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const jobs = await client.getJobs(p);
+        return { success: true, count: jobs.length, jobs: jobs.map(j => ({
+          id: j['id'], name: j['name'], department: j['department_id'],
+          expected: j['expected_employees'], company: j['company_id'], sequence: j['sequence'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_job_create',
+    description: '【HR】创建岗位（hr.job）。用于"新开个销售经理岗位"。department_id 选填。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:          { type: 'string', description: '岗位名（必填）' },
+        department_id: { type: 'number', description: '所属部门 id' },
+        sequence:      { type: 'number', description: '排序，默认 10' },
+        company_id:    { type: 'number', description: '公司 id' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; department_id?: number; sequence?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createJob(p);
+        return { success: true, id, message: `岗位 #${id}（${p.name}）已创建。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_work_locations',
+    description: '查询工作地点列表（hr.work.location）。给 odoo_homeworking_set 提供 work_location_id；location_type 可筛 home/office/other。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:       { type: 'string', description: '地点名模糊搜索' },
+        location_type: { type: 'string', enum: ['home', 'office', 'other'], description: '类型筛选' },
+        limit:         { type: 'number', description: '上限，默认50' },
+      },
+    },
+    async handler(p: { keyword?: string; location_type?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const locs = await client.getWorkLocations(p);
+        return { success: true, count: locs.length, work_locations: locs.map(l => ({
+          id: l['id'], name: l['name'], type: l['location_type'],
+          address: l['address_id'], company: l['company_id'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 合同 / 版本（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_employee_versions',
+    description: '查询员工的版本历史（hr.version）。Odoo 19+ 把"合同"重组成员工的多个版本：每次升职/调薪/换部门都会留一条版本记录。wage/date_start/date_end 字段需要 hr_manager 权限才能读，无权时退化只显示基本字段。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '员工 id（必填）' },
+        limit:       { type: 'number', description: '上限，默认30（按 date_version desc）' },
+      },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const versions = await client.getEmployeeVersions(p.employee_id, { limit: p.limit });
+        return { success: true, count: versions.length, versions: versions.map(v => ({
+          id: v['id'], name: v['name'], employee: v['employee_id'],
+          date_version: v['date_version'], department: v['department_id'], job: v['job_id'],
+          contract_type: v['contract_type_id'], wage: v['wage'],
+          company: v['company_id'], active: v['active'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 工时洞察（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_timesheet_summary',
+    description: '本月工时按项目/任务/员工聚合（account.analytic.line + read_group）。默认查当前用户本月按项目分组。group_by 可选 project/task/employee。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '员工 id，不填默认当前用户' },
+        date_from:   { type: 'string', description: '起始日 YYYY-MM-DD，默认本月初' },
+        date_to:     { type: 'string', description: '结束日 YYYY-MM-DD，默认今天' },
+        group_by:    { type: 'string', enum: ['project','task','employee'], description: '聚合维度，默认 project' },
+      },
+    },
+    async handler(p: { employee_id?: number; date_from?: string; date_to?: string; group_by?: 'project'|'task'|'employee' }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const summary = await client.getTimesheetSummary(p);
+        return { success: true, ...summary };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_timesheet_team',
+    description: '【经理视角】查我的下属本月工时（按 hr.employee.parent_id = 我对应 employee_id 找直接下属，再聚合 account.analytic.line）。manager_id 不填默认当前用户对应的员工。',
+    schema: {
+      type: 'object',
+      properties: {
+        manager_id: { type: 'number', description: '经理 hr.employee id，不填默认当前用户' },
+        date_from:  { type: 'string', description: '起始日 YYYY-MM-DD，默认本月初' },
+        date_to:    { type: 'string', description: '结束日 YYYY-MM-DD，默认今天' },
+        limit:      { type: 'number', description: '上限，默认100' },
+      },
+    },
+    async handler(p: { manager_id?: number; date_from?: string; date_to?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const team = await client.getTeamTimesheets(p);
+        const totalHours = team.reduce((s, r) => s + Number(r['hours'] ?? 0), 0);
+        return { success: true, count: team.length, total_hours: totalHours, team };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 组织架构（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_employee_org_chart',
+    description: '查员工的组织架构上下文：经理 + 导师 + 直接下属列表 + 跨级下属总数。用于"看看张三上面是谁"、"我下面有几个人"。',
+    schema: {
+      type: 'object',
+      properties: { employee_id: { type: 'number', description: '员工 id（必填）' } },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const chart = await client.getEmployeeOrgChart(p.employee_id);
+        return { success: true, ...chart };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -3225,7 +3565,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 105 个工具已注册（v1.12 — HR 行动力补完：工资单生命周期/考核动作/招聘助手/排班发布/技能管理/远程办公/车队）');
+  api.logger.info('[odoo] 119 个工具已注册（v1.13 — HR 全生命周期：员工 CRUD/入职离职/HR 仪表盘/部门岗位治理/合同版本/工时洞察/组织架构）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -3321,6 +3661,10 @@ function registerHooks(api: OpenClawPluginApi) {
 **HR 招聘（v1.11+v1.12）**：odoo_applicants · odoo_applicant_move_stage · odoo_recruitment_stages · odoo_recruitment_refuse_reasons · odoo_recruitment_create_meeting
 **HR 考核/工资/排班（v1.11+v1.12）**：odoo_appraisals · odoo_appraisal_action · odoo_payslips · odoo_payslip_validate · odoo_payslip_paid · odoo_payslip_cancel · odoo_planning_shifts · odoo_planning_publish · odoo_planning_unpublish
 **HR 技能/远程/车队（v1.12）**：odoo_employee_skills · odoo_employee_skill_add · odoo_skills_catalog · odoo_homeworking_set · odoo_fleet_vehicles
+**HR 员工生命周期（v1.13）**：odoo_employee_create · odoo_employee_update · odoo_employee_archive · odoo_employee_unarchive
+**HR 仪表盘 / 组织架构（v1.13）**：odoo_hr_dashboard · odoo_employee_org_chart · odoo_employee_versions
+**HR 部门 / 岗位 / 工作地点（v1.13）**：odoo_departments · odoo_department_create · odoo_jobs · odoo_job_create · odoo_work_locations
+**HR 工时洞察（v1.13）**：odoo_timesheet_summary · odoo_timesheet_team
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -3427,6 +3771,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 系统里有哪些技能 / 技能等级目录 | **odoo_skills_catalog** |
 | 我明天远程 / 标记某天在家办公 / 周一在上海办公室 | **odoo_homeworking_set** |
 | 我有哪辆车 / 公司车队 / 销售部的车 | **odoo_fleet_vehicles** |
+| 入职新员工 / 录入张三 / 创建员工档案 | **odoo_employee_create** |
+| 改张三的部门 / 换上级 / 改员工资料 / 加手机号 | **odoo_employee_update** |
+| 离职 / 归档员工 / 停用 X | **odoo_employee_archive** |
+| 返聘 / 启用员工 / 重新激活账号 | **odoo_employee_unarchive** |
+| HR 仪表盘 / 人事概况 / 公司在编多少人 / 今天有谁请假 | **odoo_hr_dashboard** |
+| 看看张三上面是谁 / 我下面有几个人 / 组织架构 / 上下级 | **odoo_employee_org_chart** |
+| X 的合同历史 / 员工版本 / 调薪记录 | **odoo_employee_versions** |
+| 有哪些部门 / 部门列表 / 部门树 | **odoo_departments** |
+| 新建部门 / 加个部门 | **odoo_department_create** |
+| 有哪些岗位 / 岗位列表 / 在招岗位 | **odoo_jobs** |
+| 新开个岗位 / 创建职位 | **odoo_job_create** |
+| 有哪些工作地点 / 办公室 / 远程地点 | **odoo_work_locations** |
+| 我这个月工时 / 项目工时聚合 / 工时分布 | **odoo_timesheet_summary** |
+| 我下属的工时 / 团队工时 / 谁工时少 | **odoo_timesheet_team** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 

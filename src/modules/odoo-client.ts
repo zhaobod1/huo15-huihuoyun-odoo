@@ -1531,6 +1531,357 @@ export class OdooClient {
     return result.records;
   }
 
+  // ==================== HR 全生命周期治理（v1.13） ====================
+  //
+  // v1.13 把 HR 推到「全生命周期 + 数据洞察 + 组织治理」：
+  //   - 员工 CRUD：create / update / archive / unarchive（入职 → 改资料 → 离职/返聘）
+  //   - HR 仪表盘：一次聚合在编/今日生日/待审请假/待审报销/招聘漏斗/今日请假人
+  //   - 部门 / 岗位 / 工作地点：列表 + 创建
+  //   - 合同 / 版本：hr.version 列表与历史
+  //   - 工时洞察：本月按项目聚合 / 经理查下属工时
+  //   - 组织架构：上下级树
+  //
+  // 数据洞察大量用 read_group（Odoo 原生 group-by + 聚合，比 search_read
+  // 自己 reduce 高效得多）。
+
+  // ---------- 通用：read_group helper ----------
+
+  async readGroup(model: string, domain: Domain,
+                  fields: string[], groupby: string[],
+                  options: { limit?: number; orderby?: string; lazy?: boolean } = {}): Promise<OdooRecord[]> {
+    const result = await this.call(model, 'read_group', [domain, fields, groupby], {
+      limit: options.limit ?? 100,
+      orderby: options.orderby ?? '',
+      lazy: options.lazy ?? true,
+    });
+    return Array.isArray(result) ? result as OdooRecord[] : [];
+  }
+
+  // ---------- 员工 CRUD ----------
+
+  async createEmployee(values: {
+    name: string;
+    work_email?: string;
+    work_phone?: string;
+    mobile_phone?: string;
+    job_title?: string;
+    department_id?: number;
+    job_id?: number;
+    parent_id?: number;            // 上级 hr.employee.id
+    coach_id?: number;
+    user_id?: number;              // 关联的 res.users.id
+    work_location_id?: number;
+    company_id?: number;
+  }): Promise<number> {
+    // hr.employee 的 resource_id 是 required，但 Odoo 在 create 时会按 name 自动建一条 resource.resource
+    return this.create('hr.employee', values as Record<string, unknown>);
+  }
+
+  async updateEmployee(id: number, values: {
+    name?: string;
+    work_email?: string;
+    work_phone?: string;
+    mobile_phone?: string;
+    job_title?: string;
+    department_id?: number;
+    job_id?: number;
+    parent_id?: number;
+    coach_id?: number;
+    user_id?: number;
+    work_location_id?: number;
+  }): Promise<boolean> {
+    return this.write('hr.employee', [id], values as Record<string, unknown>);
+  }
+
+  async archiveEmployee(id: number): Promise<boolean> {
+    // active 字段 related to resource_id.active；写 active=false 会同时归档 resource
+    return this.write('hr.employee', [id], { active: false });
+  }
+
+  async unarchiveEmployee(id: number): Promise<boolean> {
+    return this.write('hr.employee', [id], { active: true });
+  }
+
+  // ---------- HR 仪表盘 ----------
+
+  async getHrDashboard(): Promise<{
+    today: string;
+    headcount: { total: number; by_department: Record<string, unknown>[] };
+    today_birthdays: Record<string, unknown>[];
+    today_on_leave: Record<string, unknown>[];
+    pending_leaves: number;
+    pending_expenses: number;
+    recruitment_pipeline: Record<string, unknown>[];
+    open_positions: number;
+  }> {
+    const todayStr = today();
+    const [
+      totalActive,
+      byDept,
+      birthdays,
+      onLeave,
+      pendingLeaves,
+      pendingExpenses,
+      pipeline,
+      openPositions,
+    ] = await Promise.all([
+      this.searchCount('hr.employee', [['active', '=', true]]),
+      // 部门人数分布（read_group）
+      this.readGroup('hr.employee',
+        [['active', '=', true], ['department_id', '!=', false]],
+        ['department_id'], ['department_id'], { limit: 30 }),
+      // 今日生日（按 birthday 字段的 month-day 匹配；只有 hr.group_hr_user 才能读 birthday）
+      // 退化方案：按 search_read，前端 reduce
+      this.searchRead('hr.employee',
+        [['active', '=', true]],
+        ['id', 'name', 'birthday', 'department_id'],
+        { limit: 200 }).then(r => r.records.filter(e => {
+          const bd = e['birthday'];
+          if (typeof bd !== 'string' || bd.length < 10) return false;
+          return bd.substring(5, 10) === todayStr.substring(5, 10);
+        })).catch(() => []),  // 没权限读 birthday 时静默返空
+      // 今日请假中（state=validate, date_from <= today <= date_to）
+      this.searchRead('hr.leave',
+        [['state', '=', 'validate'],
+         ['date_from', '<=', `${todayStr} 23:59:59`],
+         ['date_to', '>=', `${todayStr} 00:00:00`]],
+        ['id', 'employee_id', 'holiday_status_id', 'date_from', 'date_to'],
+        { limit: 50 }),
+      // 待审请假（confirm + validate1）
+      this.searchCount('hr.leave', ['|', ['state', '=', 'confirm'], ['state', '=', 'validate1']]),
+      // 待审报销（submitted）
+      this.searchCount('hr.expense', [['state', '=', 'submitted']]),
+      // 招聘漏斗：按 stage 分组
+      this.readGroup('hr.applicant',
+        [['active', '=', true]],
+        ['stage_id'], ['stage_id'], { limit: 20 }).catch(() => []),
+      // 招聘中的岗位数
+      this.searchCount('hr.job', [['active', '=', true]]),
+    ]);
+    return {
+      today: todayStr,
+      headcount: {
+        total: totalActive,
+        by_department: byDept.map((g: OdooRecord) => ({
+          department: g['department_id'],
+          count: g['department_id_count'] ?? g['__count'] ?? 0,
+        })),
+      },
+      today_birthdays: (birthdays as OdooRecord[]).map(e => ({
+        id: e['id'], name: e['name'], department: e['department_id'],
+      })),
+      today_on_leave: onLeave.records.map(l => ({
+        id: l['id'], employee: l['employee_id'], type: l['holiday_status_id'],
+        from: l['date_from'], to: l['date_to'],
+      })),
+      pending_leaves: pendingLeaves,
+      pending_expenses: pendingExpenses,
+      recruitment_pipeline: pipeline.map((g: OdooRecord) => ({
+        stage: g['stage_id'],
+        count: g['stage_id_count'] ?? g['__count'] ?? 0,
+      })),
+      open_positions: openPositions,
+    };
+  }
+
+  // ---------- 部门 / 岗位 / 工作地点 ----------
+
+  async getDepartments(options: { keyword?: string; parent_id?: number; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    if (options.parent_id !== undefined) domain.push(['parent_id', '=', options.parent_id || false]);
+    const result = await this.searchRead('hr.department', domain,
+      ['id', 'name', 'complete_name', 'parent_id', 'manager_id', 'company_id', 'member_ids'],
+      { limit: options.limit ?? 100, order: 'complete_name asc' });
+    return result.records;
+  }
+
+  async createDepartment(values: {
+    name: string;
+    parent_id?: number;
+    manager_id?: number;
+    company_id?: number;
+  }): Promise<number> {
+    return this.create('hr.department', values as Record<string, unknown>);
+  }
+
+  async getJobs(options: { department_id?: number; only_active?: boolean; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    if (options.department_id) domain.push(['department_id', '=', options.department_id]);
+    const result = await this.searchRead('hr.job', domain,
+      ['id', 'name', 'department_id', 'expected_employees', 'company_id', 'sequence'],
+      { limit: options.limit ?? 100, order: 'sequence asc, name asc' });
+    return result.records;
+  }
+
+  async createJob(values: {
+    name: string;
+    department_id?: number;
+    company_id?: number;
+    sequence?: number;
+  }): Promise<number> {
+    return this.create('hr.job', values as Record<string, unknown>);
+  }
+
+  async getWorkLocations(options: { keyword?: string; location_type?: string; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    if (options.location_type) domain.push(['location_type', '=', options.location_type]);
+    const result = await this.searchRead('hr.work.location', domain,
+      ['id', 'name', 'location_type', 'address_id', 'company_id'],
+      { limit: options.limit ?? 50, order: 'name asc' });
+    return result.records;
+  }
+
+  // ---------- 合同 / 版本（hr.version） ----------
+
+  async getEmployeeVersions(employeeId: number, options: { limit?: number } = {}): Promise<OdooRecord[]> {
+    // 注意：date_start/date_end/wage 等字段需要 hr.group_hr_user / hr_manager 才能读
+    // 没权限时退化只取基本字段
+    const fields = ['id', 'name', 'employee_id', 'date_version', 'department_id', 'job_id',
+                    'contract_type_id', 'wage', 'company_id', 'active'];
+    try {
+      const result = await this.searchRead('hr.version',
+        [['employee_id', '=', employeeId]],
+        fields,
+        { limit: options.limit ?? 30, order: 'date_version desc' });
+      return result.records;
+    } catch {
+      // 退化只取基础字段
+      const result = await this.searchRead('hr.version',
+        [['employee_id', '=', employeeId]],
+        ['id', 'name', 'employee_id', 'department_id', 'job_id', 'company_id', 'active'],
+        { limit: options.limit ?? 30 });
+      return result.records;
+    }
+  }
+
+  // ---------- 工时洞察 ----------
+
+  async getTimesheetSummary(options: {
+    employee_id?: number;            // 不填默认当前用户
+    date_from?: string;              // YYYY-MM-DD，默认本月初
+    date_to?: string;                // YYYY-MM-DD，默认今天
+    group_by?: 'project' | 'task' | 'employee';   // 默认 project
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    total_hours: number;
+    groups: Record<string, unknown>[];
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const domain: Domain = [
+      ['date', '>=', dFrom],
+      ['date', '<=', dTo],
+      ['project_id', '!=', false],
+    ];
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    const groupField = options.group_by === 'task' ? 'task_id'
+                       : options.group_by === 'employee' ? 'employee_id'
+                       : 'project_id';
+    const groups = await this.readGroup('account.analytic.line',
+      domain, ['unit_amount:sum'], [groupField], { limit: 200 });
+    const totalHours = groups.reduce((sum: number, g: OdooRecord) => sum + Number(g['unit_amount'] ?? 0), 0);
+    return {
+      period: { from: dFrom, to: dTo },
+      total_hours: totalHours,
+      groups: groups.map((g: OdooRecord) => ({
+        [groupField]: g[groupField],
+        hours: g['unit_amount'] ?? 0,
+        count: g[`${groupField}_count`] ?? g['__count'] ?? 0,
+      })),
+    };
+  }
+
+  async getTeamTimesheets(options: {
+    manager_id?: number;             // 默认当前用户对应的 employee.id
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+  } = {}): Promise<Record<string, unknown>[]> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    // 找经理对应的 employee
+    let managerEmpId = options.manager_id;
+    if (!managerEmpId) {
+      try {
+        const me = await this.read('res.users', [this.uid ?? 0], ['employee_id']);
+        if (Array.isArray(me[0]?.['employee_id'])) managerEmpId = me[0]?.['employee_id'][0] as number;
+      } catch { /* noop */ }
+    }
+    if (!managerEmpId) {
+      throw new Error('未能确定当前经理 employee_id（res.users.employee_id 为空？）');
+    }
+    // 查所有 parent_id = managerEmpId 的下属
+    const subordinates = await this.searchRead('hr.employee',
+      [['parent_id', '=', managerEmpId], ['active', '=', true]],
+      ['id', 'name'], { limit: 100 });
+    const subIds = subordinates.records.map(e => e['id'] as number);
+    if (subIds.length === 0) return [];
+    // 查这批人在时间范围内的工时聚合
+    const groups = await this.readGroup('account.analytic.line',
+      [
+        ['employee_id', 'in', subIds],
+        ['date', '>=', dFrom],
+        ['date', '<=', dTo],
+        ['project_id', '!=', false],
+      ],
+      ['unit_amount:sum'], ['employee_id'], { limit: options.limit ?? 100 });
+    // 组装：员工→工时
+    const empMap = new Map(subordinates.records.map(e => [e['id'] as number, e['name']]));
+    return groups.map((g: OdooRecord) => {
+      const empArr = g['employee_id'];
+      const empId = Array.isArray(empArr) ? empArr[0] as number : 0;
+      return {
+        employee: g['employee_id'],
+        employee_name: empMap.get(empId),
+        hours: g['unit_amount'] ?? 0,
+        days_in_period: g['employee_id_count'] ?? g['__count'] ?? 0,
+      };
+    });
+  }
+
+  // ---------- 组织架构（上下级树） ----------
+
+  async getEmployeeOrgChart(employeeId: number): Promise<{
+    employee: OdooRecord | null;
+    manager: OdooRecord | null;
+    coach: OdooRecord | null;
+    direct_reports: OdooRecord[];
+    skip_level_reports_count: number;
+  }> {
+    const fields = ['id', 'name', 'job_title', 'department_id', 'parent_id',
+                    'coach_id', 'work_email', 'mobile_phone'];
+    const me = (await this.read('hr.employee', [employeeId], fields))[0];
+    if (!me) return { employee: null, manager: null, coach: null, direct_reports: [], skip_level_reports_count: 0 };
+    const managerId = Array.isArray(me['parent_id']) ? me['parent_id'][0] as number : null;
+    const coachId = Array.isArray(me['coach_id']) ? me['coach_id'][0] as number : null;
+    const [manager, coach, directReports] = await Promise.all([
+      managerId ? this.read('hr.employee', [managerId], fields).then(r => r[0] ?? null) : Promise.resolve(null),
+      coachId ? this.read('hr.employee', [coachId], fields).then(r => r[0] ?? null) : Promise.resolve(null),
+      this.searchRead('hr.employee',
+        [['parent_id', '=', employeeId], ['active', '=', true]],
+        fields, { limit: 100, order: 'name asc' }),
+    ]);
+    const directReportIds = directReports.records.map(r => r['id'] as number);
+    let skipLevelCount = 0;
+    if (directReportIds.length > 0) {
+      skipLevelCount = await this.searchCount('hr.employee',
+        [['parent_id', 'in', directReportIds], ['active', '=', true]]);
+    }
+    return {
+      employee: me,
+      manager: manager ?? null,
+      coach: coach ?? null,
+      direct_reports: directReports.records,
+      skip_level_reports_count: skipLevelCount,
+    };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{
