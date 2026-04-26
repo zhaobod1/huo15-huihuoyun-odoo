@@ -1044,6 +1044,278 @@ export class OdooClient {
     return this.call('approval.request', 'action_refuse', [[id]]);
   }
 
+  // ==================== HR 扩展（v1.11） ====================
+  //
+  // v1.11 新增：请假闭环 / 报销闭环 / 招聘 / 考核 / 工资 / 排班
+  //
+  // 注意权限边界：
+  //   - hr_payroll.* 需要 hr_payroll.group_hr_payroll_user
+  //   - hr_recruitment.stage 写操作需要 hr_recruitment.group_hr_recruitment_user
+  //   - hr.expense 的 action_approve 之上需要 hr_expense.group_hr_expense_team_approver
+  //   - hr.leave 的 action_validate（二次审批）需要 hr_holidays.group_hr_holidays_manager
+  //
+  // 这里只做 RPC 调用，权限错误由 Odoo 自己抛 → 上层 catch 后返回给用户
+
+  // ---------- 请假类型 / 申请 / 审批 / 额度分配 ----------
+
+  async getLeaveTypes(options: { keyword?: string; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['active', '=', true]];
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    const result = await this.searchRead('hr.leave.type', domain,
+      ['id', 'name', 'requires_allocation', 'leave_validation_type', 'request_unit', 'company_id', 'color'],
+      { limit: options.limit ?? 30, order: 'name asc' });
+    return result.records;
+  }
+
+  async createLeave(values: {
+    employee_id?: number;            // 不填默认当前 user 的 employee
+    holiday_status_id: number;
+    request_date_from: string;       // YYYY-MM-DD
+    request_date_to: string;         // YYYY-MM-DD
+    name?: string;                   // 请假事由
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      holiday_status_id: values.holiday_status_id,
+      request_date_from: values.request_date_from,
+      request_date_to: values.request_date_to,
+    };
+    if (values.employee_id) payload['employee_id'] = values.employee_id;
+    if (values.name) payload['name'] = values.name;
+    return this.create('hr.leave', payload);
+  }
+
+  async approveLeave(id: number): Promise<unknown> {
+    // action_approve 自动在 confirm→validate1→validate 状态机里递进
+    return this.call('hr.leave', 'action_approve', [[id]]);
+  }
+
+  async refuseLeave(id: number): Promise<unknown> {
+    return this.call('hr.leave', 'action_refuse', [[id]]);
+  }
+
+  async cancelLeave(id: number, reason?: string): Promise<unknown> {
+    // hr.leave.action_cancel 在 v17+ 支持 reason 参数；v15/v16 直接 action_cancel
+    if (reason) {
+      try { return await this.call('hr.leave', 'action_cancel', [[id]], { reason }); }
+      catch { /* fallback */ }
+    }
+    return this.call('hr.leave', 'action_cancel', [[id]]);
+  }
+
+  async createLeaveAllocation(values: {
+    employee_id: number;
+    holiday_status_id: number;
+    number_of_days: number;
+    name?: string;
+    date_from?: string;              // YYYY-MM-DD，默认今天
+    auto_approve?: boolean;          // true 时创建后立即调 action_approve
+  }): Promise<{ id: number; approved: boolean }> {
+    const payload: Record<string, unknown> = {
+      employee_id: values.employee_id,
+      holiday_status_id: values.holiday_status_id,
+      number_of_days: values.number_of_days,
+      allocation_type: 'regular',
+    };
+    if (values.name) payload['name'] = values.name;
+    if (values.date_from) payload['date_from'] = values.date_from;
+    const id = await this.create('hr.leave.allocation', payload);
+    let approved = false;
+    if (values.auto_approve) {
+      try { await this.call('hr.leave.allocation', 'action_approve', [[id]]); approved = true; }
+      catch { /* 权限不足 / 状态不对 → 保留 draft，让用户手动审批 */ }
+    }
+    return { id, approved };
+  }
+
+  // ---------- 报销 ----------
+
+  async getExpenses(options: {
+    employee_id?: number;
+    state?: string;                  // draft / submitted / approved / posted / paid / refused
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    const result = await this.searchRead('hr.expense', domain,
+      ['id', 'name', 'employee_id', 'product_id', 'date', 'total_amount', 'currency_id', 'state', 'payment_state'],
+      { limit: options.limit ?? 30, order: 'date desc' });
+    return result.records;
+  }
+
+  async createExpense(values: {
+    name: string;
+    product_id?: number;             // 默认 0 时让 Odoo 取默认产品
+    employee_id?: number;
+    quantity?: number;
+    unit_amount?: number;            // 当 product 是按数量计费时
+    total_amount?: number;           // 总金额（首选；产品行无单价时直接传）
+    date?: string;                   // YYYY-MM-DD，默认今天
+    description?: string;
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      name: values.name,
+      quantity: values.quantity ?? 1,
+    };
+    if (values.product_id) payload['product_id'] = values.product_id;
+    if (values.employee_id) payload['employee_id'] = values.employee_id;
+    if (values.unit_amount !== undefined) payload['unit_amount'] = values.unit_amount;
+    if (values.total_amount !== undefined) payload['total_amount'] = values.total_amount;
+    if (values.date) payload['date'] = values.date;
+    if (values.description) payload['description'] = values.description;
+    return this.create('hr.expense', payload);
+  }
+
+  async submitExpense(ids: number[]): Promise<unknown> {
+    // hr.expense.action_submit 在不同版本叫法不一：v17 是 action_submit_sheet，v18+ 是 action_submit
+    try { return await this.call('hr.expense', 'action_submit', [ids]); }
+    catch {
+      return this.call('hr.expense', 'action_submit_sheet', [ids]);
+    }
+  }
+
+  async approveExpense(ids: number[]): Promise<unknown> {
+    try { return await this.call('hr.expense', 'action_approve', [ids]); }
+    catch {
+      // 老版本走 sheet
+      return this.call('hr.expense', 'action_approve_expense_sheets', [ids]);
+    }
+  }
+
+  async refuseExpense(ids: number[], reason?: string): Promise<unknown> {
+    if (reason) {
+      try { return await this.call('hr.expense', 'action_refuse', [ids], { reason }); }
+      catch { /* fallback */ }
+    }
+    try { return await this.call('hr.expense', 'action_refuse', [ids]); }
+    catch {
+      return this.call('hr.expense', 'action_refuse_expense_sheets', [ids]);
+    }
+  }
+
+  // ---------- 招聘 ----------
+
+  async getApplicants(options: {
+    job_id?: number;
+    stage_id?: number;
+    keyword?: string;
+    only_active?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    if (options.job_id) domain.push(['job_id', '=', options.job_id]);
+    if (options.stage_id) domain.push(['stage_id', '=', options.stage_id]);
+    if (options.keyword) domain.push('|', ['partner_name', 'ilike', options.keyword], ['email_from', 'ilike', options.keyword]);
+    const result = await this.searchRead('hr.applicant', domain,
+      ['id', 'partner_name', 'email_from', 'job_id', 'stage_id', 'kanban_state', 'priority',
+       'user_id', 'date_open', 'date_last_stage_update', 'salary_expected', 'salary_proposed', 'availability'],
+      { limit: options.limit ?? 30, order: 'priority desc, date_last_stage_update desc' });
+    return result.records;
+  }
+
+  async getRecruitmentStages(jobId?: number): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (jobId) domain.push('|', ['job_ids', 'in', [jobId]], ['job_ids', '=', false]);
+    const result = await this.searchRead('hr.recruitment.stage', domain,
+      ['id', 'name', 'sequence', 'hired_stage', 'fold'],
+      { limit: 50, order: 'sequence asc' });
+    return result.records;
+  }
+
+  async moveApplicantStage(id: number, opts: {
+    stage_id?: number;
+    kanban_state?: 'normal' | 'done' | 'blocked';
+    refuse_reason_id?: number;
+  }): Promise<boolean> {
+    const values: Record<string, unknown> = {};
+    if (opts.stage_id) values['stage_id'] = opts.stage_id;
+    if (opts.kanban_state) values['kanban_state'] = opts.kanban_state;
+    if (opts.refuse_reason_id) values['refuse_reason_id'] = opts.refuse_reason_id;
+    if (Object.keys(values).length === 0) return true;
+    return this.write('hr.applicant', [id], values);
+  }
+
+  async getApplicantRefuseReasons(): Promise<OdooRecord[]> {
+    const result = await this.searchRead('hr.applicant.refuse.reason', [],
+      ['id', 'name'], { limit: 30, order: 'name asc' });
+    return result.records;
+  }
+
+  // ---------- 考核 ----------
+
+  async getAppraisals(options: {
+    employee_id?: number;
+    state?: '1_new' | '2_pending' | '3_done';
+    only_mine?: boolean;             // 我作为 reviewer
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    if (options.only_mine) domain.push(['manager_ids.user_id', '=', this.uid ?? 0]);
+    const result = await this.searchRead('hr.appraisal', domain,
+      ['id', 'employee_id', 'department_id', 'job_id', 'manager_ids',
+       'date_close', 'state', 'next_appraisal_date', 'waiting_feedback'],
+      { limit: options.limit ?? 20, order: 'date_close desc' });
+    return result.records;
+  }
+
+  async appraisalAction(id: number, action: 'confirm' | 'done' | 'back'): Promise<unknown> {
+    const methodMap = { confirm: 'action_confirm', done: 'action_done', back: 'action_back' };
+    return this.call('hr.appraisal', methodMap[action], [[id]]);
+  }
+
+  // ---------- 工资 ----------
+
+  async getPayslips(options: {
+    employee_id?: number;
+    state?: 'draft' | 'verify' | 'done' | 'paid' | 'cancel';
+    payslip_run_id?: number;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    else domain.push(['employee_id.user_id', '=', this.uid ?? 0]);
+    if (options.payslip_run_id) domain.push(['payslip_run_id', '=', options.payslip_run_id]);
+    const result = await this.searchRead('hr.payslip', domain,
+      ['id', 'name', 'employee_id', 'date_from', 'date_to', 'state',
+       'basic_wage', 'gross_wage', 'net_wage', 'currency_id', 'payslip_run_id', 'paid'],
+      { limit: options.limit ?? 20, order: 'date_from desc' });
+    return result.records;
+  }
+
+  // ---------- 排班 ----------
+
+  async getPlanningShifts(options: {
+    employee_id?: number;
+    department_id?: number;
+    date_from?: string;              // YYYY-MM-DD，默认今天
+    date_to?: string;                // YYYY-MM-DD，默认 7 天后
+    only_published?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const dFrom = options.date_from ?? today();
+    const dTo = options.date_to ?? (() => {
+      const d = new Date(); d.setDate(d.getDate() + 7);
+      return d.toISOString().substring(0, 10);
+    })();
+    const domain: Domain = [
+      ['start_datetime', '>=', `${dFrom} 00:00:00`],
+      ['start_datetime', '<=', `${dTo} 23:59:59`],
+    ];
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    if (options.department_id) domain.push(['department_id', '=', options.department_id]);
+    if (options.only_published) domain.push(['state', '=', 'published']);
+    const result = await this.searchRead('planning.slot', domain,
+      ['id', 'employee_id', 'role_id', 'department_id', 'start_datetime', 'end_datetime',
+       'allocated_hours', 'state', 'name'],
+      { limit: options.limit ?? 50, order: 'start_datetime asc' });
+    return result.records;
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

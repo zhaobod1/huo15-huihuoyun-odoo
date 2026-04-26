@@ -1148,6 +1148,366 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // HR 闭环（v1.11 新增 14 个）
+  //   请假 5 + 报销 4 + 招聘 2 + 考核/工资/排班 3
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 请假闭环（5 个） ----------
+
+  api.registerTool({
+    name: 'odoo_leave_types',
+    description: '查询请假类型列表（hr.leave.type），用于"有哪些假可以请"、"请假类型"。新建请假前先调一次拿到 holiday_status_id。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword: { type: 'string', description: '按名称模糊搜索' },
+        limit:   { type: 'number', description: '上限，默认30' },
+      },
+    },
+    async handler(p: { keyword?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const types = await client.getLeaveTypes({ keyword: p.keyword, limit: p.limit });
+        return { success: true, count: types.length, leave_types: types.map(t => ({
+          id: t['id'], name: t['name'], requires_allocation: t['requires_allocation'],
+          validation: t['leave_validation_type'], unit: t['request_unit'], company: t['company_id'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leave_create',
+    description: '创建请假申请（hr.leave）。用于"我请假明天 / 我请假 5.1–5.3 / 帮某员工请病假"。日期格式 YYYY-MM-DD。先用 odoo_leave_types 查 holiday_status_id。',
+    schema: {
+      type: 'object',
+      properties: {
+        holiday_status_id:  { type: 'number', description: '请假类型 id（必填，从 odoo_leave_types 查）' },
+        request_date_from:  { type: 'string', description: '开始日期 YYYY-MM-DD（必填）' },
+        request_date_to:    { type: 'string', description: '结束日期 YYYY-MM-DD（必填，单日则与 from 相同）' },
+        employee_id:        { type: 'number', description: '员工 id，不填默认为当前用户' },
+        name:               { type: 'string', description: '请假事由说明' },
+      },
+      required: ['holiday_status_id', 'request_date_from', 'request_date_to'],
+    },
+    async handler(p: { holiday_status_id: number; request_date_from: string; request_date_to: string; employee_id?: number; name?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createLeave(p);
+        return { success: true, id, message: `请假申请 #${id} 已提交，等待审批。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leave_approve',
+    description: '批准请假申请（hr.leave.action_approve）。会自动按 validation_type 推进到下一阶段（confirm→validate1→validate）。需要"我"是该请假的审批人。',
+    schema: {
+      type: 'object',
+      properties: { leave_id: { type: 'number', description: '请假记录 id（必填）' } },
+      required: ['leave_id'],
+    },
+    async handler(p: { leave_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.approveLeave(p.leave_id);
+        return { success: true, message: `请假 #${p.leave_id} 已批准（按双重审批策略自动推进状态）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leave_refuse',
+    description: '拒绝请假申请（hr.leave.action_refuse）。',
+    schema: {
+      type: 'object',
+      properties: { leave_id: { type: 'number', description: '请假记录 id（必填）' } },
+      required: ['leave_id'],
+    },
+    async handler(p: { leave_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.refuseLeave(p.leave_id);
+        return { success: true, message: `请假 #${p.leave_id} 已拒绝。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leave_allocate',
+    description: '【HR/管理员动作】给员工分配请假额度（hr.leave.allocation）。用于"给张三加 5 天年假"、"补一下王五本年度调休额度"。auto_approve=true 时会立即调 action_approve 直接生效（需要 hr_holidays.group_hr_holidays_user 权限）。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:       { type: 'number', description: '员工 id（必填）' },
+        holiday_status_id: { type: 'number', description: '请假类型 id（必填）' },
+        number_of_days:    { type: 'number', description: '分配天数（必填）' },
+        name:              { type: 'string', description: '分配说明，如"2026 年初年假"' },
+        date_from:         { type: 'string', description: '生效起始日期 YYYY-MM-DD，默认今天' },
+        auto_approve:      { type: 'boolean', description: '是否创建后立即批准生效，默认 false（保留 draft 由其他人审批）' },
+      },
+      required: ['employee_id', 'holiday_status_id', 'number_of_days'],
+    },
+    async handler(p: { employee_id: number; holiday_status_id: number; number_of_days: number; name?: string; date_from?: string; auto_approve?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const { id, approved } = await client.createLeaveAllocation(p);
+        return { success: true, id, approved,
+          message: approved
+            ? `已为员工 #${p.employee_id} 分配 ${p.number_of_days} 天假期（额度 #${id} 已批准生效）。`
+            : `已为员工 #${p.employee_id} 创建 ${p.number_of_days} 天假期分配（#${id}），状态 draft 等待审批。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 报销闭环（4 个） ----------
+
+  api.registerTool({
+    name: 'odoo_expenses',
+    description: '查询报销列表（hr.expense）。用于"我的报销"、"待批的报销"。state 可筛 draft/submitted/approved/posted/paid/refused。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '员工 id，不填默认为当前用户' },
+        state:       { type: 'string', enum: ['draft','submitted','approved','posted','paid','refused'], description: '状态筛选' },
+        limit:       { type: 'number', description: '上限，默认30' },
+      },
+    },
+    async handler(p: { employee_id?: number; state?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const expenses = await client.getExpenses(p);
+        return { success: true, count: expenses.length, expenses: expenses.map(e => ({
+          id: e['id'], name: e['name'], employee: e['employee_id'], product: e['product_id'],
+          date: e['date'], amount: e['total_amount'], currency: e['currency_id'],
+          state: e['state'], payment_state: e['payment_state'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_expense_create',
+    description: '创建报销（hr.expense）。用于"我要报销 200 块的差旅"、"报销昨天的客户餐饮 350 元"。total_amount 是总金额（首选）。employee_id 不填则归到当前用户。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:         { type: 'string', description: '报销描述（必填），如"客户餐饮"、"出差打车"' },
+        total_amount: { type: 'number', description: '总金额（推荐填这个，简单直接）' },
+        unit_amount:  { type: 'number', description: '单价（如果按数量计费）' },
+        quantity:     { type: 'number', description: '数量，默认 1' },
+        product_id:   { type: 'number', description: '报销品类 product_id，可选' },
+        employee_id:  { type: 'number', description: '员工 id，不填默认当前用户' },
+        date:         { type: 'string', description: '发生日期 YYYY-MM-DD，默认今天' },
+        description:  { type: 'string', description: '详细说明' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; total_amount?: number; unit_amount?: number; quantity?: number; product_id?: number; employee_id?: number; date?: string; description?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createExpense(p);
+        return { success: true, id, message: `报销 #${id} 已创建（草稿）。如需提交审批请调 odoo_expense_submit。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_expense_submit',
+    description: '提交报销给经理审批（hr.expense.action_submit / action_submit_sheet）。用于"把这条报销提交"、"批量提交我所有 draft 报销"。',
+    schema: {
+      type: 'object',
+      properties: { expense_ids: { type: 'array', items: { type: 'number' }, description: '报销 id 数组（必填）' } },
+      required: ['expense_ids'],
+    },
+    async handler(p: { expense_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.submitExpense(p.expense_ids);
+        return { success: true, message: `已提交报销 ${p.expense_ids.map(i => '#'+i).join(', ')} 给经理审批。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_expense_approve',
+    description: '批准或拒绝报销（hr.expense.action_approve / action_refuse）。action="approve"/"refuse"。需要相应权限（团队审批人/财务）。',
+    schema: {
+      type: 'object',
+      properties: {
+        expense_ids: { type: 'array', items: { type: 'number' }, description: '报销 id 数组（必填）' },
+        action:      { type: 'string', enum: ['approve', 'refuse'], description: '动作（必填）' },
+        reason:      { type: 'string', description: '拒绝时的理由说明（可选，仅 refuse 用）' },
+      },
+      required: ['expense_ids', 'action'],
+    },
+    async handler(p: { expense_ids: number[]; action: 'approve' | 'refuse'; reason?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        if (p.action === 'approve') {
+          await client.approveExpense(p.expense_ids);
+          return { success: true, message: `报销 ${p.expense_ids.map(i => '#'+i).join(', ')} 已批准。` };
+        }
+        await client.refuseExpense(p.expense_ids, p.reason);
+        return { success: true, message: `报销 ${p.expense_ids.map(i => '#'+i).join(', ')} 已拒绝${p.reason ? '（理由：' + p.reason + '）' : ''}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 招聘闭环（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_applicants',
+    description: '查询应聘者列表（hr.applicant）。用于"看招聘 pipeline"、"某岗位的候选人"、"等待面试的"。可按 job_id/stage_id 筛选；keyword 模糊匹配姓名/邮箱。',
+    schema: {
+      type: 'object',
+      properties: {
+        job_id:        { type: 'number', description: '招聘岗位 id（hr.job）' },
+        stage_id:      { type: 'number', description: '招聘阶段 id（hr.recruitment.stage）' },
+        keyword:       { type: 'string', description: '姓名/邮箱模糊搜索' },
+        only_active:   { type: 'boolean', description: '只看活跃，默认 true（false 包括归档）' },
+        limit:         { type: 'number', description: '上限，默认30' },
+      },
+    },
+    async handler(p: { job_id?: number; stage_id?: number; keyword?: string; only_active?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const apps = await client.getApplicants(p);
+        return { success: true, count: apps.length, applicants: apps.map(a => ({
+          id: a['id'], name: a['partner_name'], email: a['email_from'], job: a['job_id'],
+          stage: a['stage_id'], kanban: a['kanban_state'], priority: a['priority'],
+          recruiter: a['user_id'], date_open: a['date_open'],
+          last_stage_update: a['date_last_stage_update'],
+          salary_expected: a['salary_expected'], salary_proposed: a['salary_proposed'],
+          availability: a['availability'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_applicant_move_stage',
+    description: '移动应聘者的招聘阶段或更改 kanban 状态（hr.applicant.write）。用于"把张三推进到面试阶段"、"标记候选人 #88 为 done"、"拒绝应聘者并填理由"。先用 odoo_search(model="hr.recruitment.stage") 查阶段 id；用 odoo_search(model="hr.applicant.refuse.reason") 查拒绝理由 id。',
+    schema: {
+      type: 'object',
+      properties: {
+        applicant_id:     { type: 'number', description: '应聘者 id（必填）' },
+        stage_id:         { type: 'number', description: '目标阶段 id' },
+        kanban_state:     { type: 'string', enum: ['normal','done','blocked'], description: 'Kanban 状态：normal=进行中 / done=可推进 / blocked=阻塞' },
+        refuse_reason_id: { type: 'number', description: '拒绝理由 id（设置该字段意味着拒绝候选人）' },
+      },
+      required: ['applicant_id'],
+    },
+    async handler(p: { applicant_id: number; stage_id?: number; kanban_state?: 'normal' | 'done' | 'blocked'; refuse_reason_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.moveApplicantStage(p.applicant_id, {
+          stage_id: p.stage_id, kanban_state: p.kanban_state, refuse_reason_id: p.refuse_reason_id,
+        });
+        const parts: string[] = [];
+        if (p.stage_id) parts.push(`阶段→#${p.stage_id}`);
+        if (p.kanban_state) parts.push(`状态→${p.kanban_state}`);
+        if (p.refuse_reason_id) parts.push(`拒绝（理由 #${p.refuse_reason_id}）`);
+        return { success: true, message: `候选人 #${p.applicant_id} 已更新：${parts.join('；') || '无变化'}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 考核 / 工资 / 排班（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_appraisals',
+    description: '查询员工考核列表（hr.appraisal）。state: 1_new=待启动 / 2_pending=进行中 / 3_done=完成。only_mine=true 时只看我作为 reviewer 的考核。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id: { type: 'number', description: '被考核员工 id' },
+        state:       { type: 'string', enum: ['1_new','2_pending','3_done'], description: '状态筛选' },
+        only_mine:   { type: 'boolean', description: 'true=只看我作为 reviewer 的' },
+        limit:       { type: 'number', description: '上限，默认20' },
+      },
+    },
+    async handler(p: { employee_id?: number; state?: '1_new'|'2_pending'|'3_done'; only_mine?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const apps = await client.getAppraisals(p);
+        return { success: true, count: apps.length, appraisals: apps.map(a => ({
+          id: a['id'], employee: a['employee_id'], department: a['department_id'], job: a['job_id'],
+          managers: a['manager_ids'], date_close: a['date_close'], state: a['state'],
+          next_date: a['next_appraisal_date'], waiting_feedback: a['waiting_feedback'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_payslips',
+    description: '查询工资单列表（hr.payslip）。需要 hr_payroll.group_hr_payroll_user 权限。state: draft/verify/done/paid/cancel。不填 employee_id 默认查当前用户。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:     { type: 'number', description: '员工 id，不填默认查当前用户' },
+        state:           { type: 'string', enum: ['draft','verify','done','paid','cancel'], description: '状态筛选' },
+        payslip_run_id:  { type: 'number', description: '所属批次 id（hr.payslip.run）' },
+        limit:           { type: 'number', description: '上限，默认20' },
+      },
+    },
+    async handler(p: { employee_id?: number; state?: 'draft'|'verify'|'done'|'paid'|'cancel'; payslip_run_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const slips = await client.getPayslips(p);
+        return { success: true, count: slips.length, payslips: slips.map(s => ({
+          id: s['id'], name: s['name'], employee: s['employee_id'],
+          period_from: s['date_from'], period_to: s['date_to'], state: s['state'],
+          basic: s['basic_wage'], gross: s['gross_wage'], net: s['net_wage'],
+          currency: s['currency_id'], run: s['payslip_run_id'], paid: s['paid'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_planning_shifts',
+    description: '查询排班 / 班次（planning.slot）。用于"我这周的班"、"客服团队这周排班"。date_from/to 默认今天到 7 天后。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:     { type: 'number', description: '员工 id 筛选' },
+        department_id:   { type: 'number', description: '部门 id 筛选' },
+        date_from:       { type: 'string', description: '起始日 YYYY-MM-DD，默认今天' },
+        date_to:         { type: 'string', description: '结束日 YYYY-MM-DD，默认 7 天后' },
+        only_published:  { type: 'boolean', description: '只看已发布的班次' },
+        limit:           { type: 'number', description: '上限，默认50' },
+      },
+    },
+    async handler(p: { employee_id?: number; department_id?: number; date_from?: string; date_to?: string; only_published?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const shifts = await client.getPlanningShifts(p);
+        return { success: true, count: shifts.length, shifts: shifts.map(s => ({
+          id: s['id'], employee: s['employee_id'], role: s['role_id'], department: s['department_id'],
+          start: s['start_datetime'], end: s['end_datetime'], hours: s['allocated_hours'],
+          state: s['state'], note: s['name'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -2548,7 +2908,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 77 个工具已注册（v1.10 — 共享凭据 + 跨渠道复用）');
+  api.logger.info('[odoo] 91 个工具已注册（v1.11 — HR 闭环：请假/报销/招聘/考核/工资/排班）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -2638,7 +2998,11 @@ function registerHooks(api: OpenClawPluginApi) {
 **财务**：odoo_invoices
 **联系人**：odoo_contacts · odoo_contact_create
 **库存**：odoo_stock_levels · odoo_stock_pickings
-**HR** ：odoo_employees · odoo_leaves · odoo_attendances
+**HR 基础** ：odoo_employees · odoo_leaves · odoo_attendances
+**HR 请假闭环（v1.11）**：odoo_leave_types · odoo_leave_create · odoo_leave_approve · odoo_leave_refuse · odoo_leave_allocate
+**HR 报销闭环（v1.11）**：odoo_expenses · odoo_expense_create · odoo_expense_submit · odoo_expense_approve
+**HR 招聘（v1.11）**：odoo_applicants · odoo_applicant_move_stage
+**HR 考核/工资/排班（v1.11）**：odoo_appraisals · odoo_payslips · odoo_planning_shifts
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -2717,6 +3081,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 把工单派给 X | **odoo_ticket_assign** |
 | 批这条 / 审批通过 | **odoo_approval_approve** |
 | 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
+| 有哪些假可以请 / 请假类型 | **odoo_leave_types** |
+| 我请假 / 帮 X 请病假 / 请假明天 | **odoo_leave_create** |
+| 批了这条请假 / 准了某某的假 | **odoo_leave_approve** |
+| 不批这个请假 / 拒了请假 | **odoo_leave_refuse** |
+| 给某员工加假期 / 补调休额度 / 分配年假 | **odoo_leave_allocate** |
+| 我的报销 / 待批的报销 / 看报销列表 | **odoo_expenses** |
+| 我要报销 / 报销 X 元 / 报昨天的差旅 | **odoo_expense_create** |
+| 把这条报销提交 / 提交我的报销 | **odoo_expense_submit** |
+| 批了这条报销 / 拒绝报销 / 通过 X 的报销 | **odoo_expense_approve** |
+| 招聘 pipeline / 候选人列表 / 某岗位有谁 | **odoo_applicants** |
+| 把候选人推到面试 / 移动应聘者阶段 / 拒绝候选人 | **odoo_applicant_move_stage** |
+| 看考核 / 我要做的绩效 / 待评的人 | **odoo_appraisals** |
+| 我的工资单 / 这个月工资 / 看薪资 | **odoo_payslips** |
+| 我这周的班 / 排班 / 谁今天值班 | **odoo_planning_shifts** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
