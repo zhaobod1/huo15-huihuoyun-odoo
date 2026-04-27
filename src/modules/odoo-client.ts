@@ -4031,6 +4031,493 @@ export class OdooClient {
     };
   }
 
+  // ==================== Studio 元编程 + 审计 + 多公司 + 报表 + 集成（v1.18） ====================
+  //
+  // v1.18 五个主题：
+  //   - Studio 元编程：ir.model / ir.model.fields 创建与查询
+  //   - 审计与变更追踪：mail.tracking.value / res.users.log / 字段历史
+  //   - 多公司联动：切公司 + 跨公司聚合
+  //   - 报表深化：通用 pivot 数据
+  //   - 外部集成：webhook / portal 分享 / 邮件日志
+
+  // ---------- Studio 元编程 4 ----------
+
+  async getModels(options: {
+    keyword?: string;                    // 模型名 / 描述模糊搜
+    only_custom?: boolean;               // 只看自定义（state='manual'）
+    transient?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.keyword) {
+      domain.push('|', ['model', 'ilike', options.keyword], ['name', 'ilike', options.keyword]);
+    }
+    if (options.only_custom) domain.push(['state', '=', 'manual']);
+    if (options.transient !== undefined) domain.push(['transient', '=', options.transient]);
+    const result = await this.searchRead('ir.model', domain,
+      ['id', 'name', 'model', 'state', 'info', 'transient', 'abstract', 'order'],
+      { limit: options.limit ?? 100, order: 'model asc' });
+    return result.records;
+  }
+
+  async getModelFields(model: string, options: {
+    keyword?: string;
+    only_custom?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [['model', '=', model]];
+    if (options.keyword) {
+      domain.push('|', ['name', 'ilike', options.keyword], ['field_description', 'ilike', options.keyword]);
+    }
+    if (options.only_custom) domain.push(['state', '=', 'manual']);
+    const result = await this.searchRead('ir.model.fields', domain,
+      ['id', 'name', 'field_description', 'ttype', 'required', 'readonly',
+       'relation', 'selection', 'state', 'translate', 'help'],
+      { limit: options.limit ?? 200, order: 'name asc' });
+    return result.records;
+  }
+
+  async createModel(values: {
+    name: string;                        // 显示名
+    model: string;                       // 技术名，必须 x_ 开头
+    transient?: boolean;
+    abstract?: boolean;
+  }): Promise<number> {
+    if (!values.model.startsWith('x_')) {
+      throw new Error('自定义模型 model 必须以 x_ 开头（Odoo 强制约束）');
+    }
+    return this.create('ir.model', {
+      name: values.name,
+      model: values.model,
+      state: 'manual',
+      transient: values.transient ?? false,
+      abstract: values.abstract ?? false,
+    });
+  }
+
+  async createModelField(values: {
+    model: string;                       // 目标 model 技术名
+    name: string;                        // 字段名，必须 x_ 开头
+    field_description: string;
+    ttype: 'char' | 'text' | 'integer' | 'float' | 'monetary' | 'boolean' | 'date'
+         | 'datetime' | 'binary' | 'selection' | 'many2one' | 'one2many' | 'many2many' | 'html';
+    required?: boolean;
+    relation?: string;                   // many2one / one2many / many2many 必填
+    selection?: Array<[string, string]>; // selection 必填，[[key, label], ...]
+    help?: string;
+    translate?: boolean;
+  }): Promise<number> {
+    if (!values.name.startsWith('x_')) {
+      throw new Error('自定义字段 name 必须以 x_ 开头（Odoo 强制约束）');
+    }
+    // model 字段需要 model_id（通过 model 技术名查 ir.model.id）
+    const modelRec = await this.searchRead('ir.model',
+      [['model', '=', values.model]], ['id'], { limit: 1 });
+    if (modelRec.records.length === 0) {
+      throw new Error(`模型 ${values.model} 不存在`);
+    }
+    const modelId = modelRec.records[0]?.['id'] as number;
+    const payload: Record<string, unknown> = {
+      model: values.model,
+      model_id: modelId,
+      name: values.name,
+      field_description: values.field_description,
+      ttype: values.ttype,
+      state: 'manual',
+      required: values.required ?? false,
+    };
+    if (values.relation) payload['relation'] = values.relation;
+    if (values.selection) {
+      payload['selection'] = JSON.stringify(values.selection);
+    }
+    if (values.help) payload['help'] = values.help;
+    if (values.translate) payload['translate'] = values.translate;
+    return this.create('ir.model.fields', payload);
+  }
+
+  // ---------- 审计与变更追踪 3 ----------
+
+  async getAuditLog(options: {
+    model: string;
+    record_id: number;
+    limit?: number;
+  }): Promise<{
+    model: string;
+    record_id: number;
+    changes: Array<{
+      date: unknown;
+      author: unknown;
+      field: unknown;
+      old_value: unknown;
+      new_value: unknown;
+    }>;
+  }> {
+    // 拉这条记录的 mail.message 列表，再取每条 message 的 tracking_value_ids
+    const messages = await this.searchRead('mail.message',
+      [['model', '=', options.model], ['res_id', '=', options.record_id]],
+      ['id', 'date', 'author_id', 'tracking_value_ids', 'subject', 'body'],
+      { limit: options.limit ?? 100, order: 'date desc' });
+    const allTrackingIds = messages.records.flatMap(m =>
+      Array.isArray(m['tracking_value_ids']) ? m['tracking_value_ids'] as number[] : []);
+    const trackingsById = new Map<number, OdooRecord>();
+    if (allTrackingIds.length > 0) {
+      const trackings = await this.read('mail.tracking.value', allTrackingIds,
+        ['id', 'field_id', 'old_value_char', 'new_value_char',
+         'mail_message_id']);
+      for (const t of trackings) {
+        trackingsById.set(t['id'] as number, t);
+      }
+    }
+    const changes: Array<{
+      date: unknown; author: unknown; field: unknown;
+      old_value: unknown; new_value: unknown;
+    }> = [];
+    for (const m of messages.records) {
+      const trackingIds = Array.isArray(m['tracking_value_ids']) ? m['tracking_value_ids'] as number[] : [];
+      for (const tid of trackingIds) {
+        const t = trackingsById.get(tid);
+        if (!t) continue;
+        changes.push({
+          date: m['date'],
+          author: m['author_id'],
+          field: t['field_id'],
+          old_value: t['old_value_char'],
+          new_value: t['new_value_char'],
+        });
+      }
+    }
+    return { model: options.model, record_id: options.record_id, changes };
+  }
+
+  async getLoginHistory(options: {
+    user_id?: number;                    // 不填默认当前
+    days?: number;                       // 默认 30
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const days = options.days ?? 30;
+    const dateFrom = (() => {
+      const d = new Date(); d.setDate(d.getDate() - days);
+      return d.toISOString().substring(0, 19).replace('T', ' ');
+    })();
+    const userId = options.user_id ?? this.uid ?? 0;
+    const result = await this.searchRead('res.users.log',
+      [['user_id', '=', userId], ['create_date', '>=', dateFrom]],
+      ['id', 'user_id', 'create_date'],
+      { limit: options.limit ?? 100, order: 'create_date desc' });
+    return result.records;
+  }
+
+  async getFieldHistory(options: {
+    model: string;
+    record_id: number;
+    field_name: string;
+    limit?: number;
+  }): Promise<{
+    model: string;
+    record_id: number;
+    field_name: string;
+    history: Array<{ date: unknown; author: unknown; from: unknown; to: unknown }>;
+  }> {
+    // 找该字段对应的 ir.model.fields.id
+    const fieldRec = await this.searchRead('ir.model.fields',
+      [['model', '=', options.model], ['name', '=', options.field_name]],
+      ['id'], { limit: 1 });
+    if (fieldRec.records.length === 0) {
+      throw new Error(`字段 ${options.model}.${options.field_name} 不存在`);
+    }
+    const fieldId = fieldRec.records[0]?.['id'] as number;
+    // mail.tracking.value 没有 res_model + res_id 字段（追踪挂在 mail.message 上）
+    // 必须先找 mail.message，再过滤 tracking
+    const messages = await this.searchRead('mail.message',
+      [['model', '=', options.model], ['res_id', '=', options.record_id],
+       ['tracking_value_ids', '!=', false]],
+      ['id', 'date', 'author_id', 'tracking_value_ids'],
+      { limit: 200, order: 'date desc' });
+    const allTrackingIds = messages.records.flatMap(m =>
+      Array.isArray(m['tracking_value_ids']) ? m['tracking_value_ids'] as number[] : []);
+    if (allTrackingIds.length === 0) {
+      return { model: options.model, record_id: options.record_id,
+               field_name: options.field_name, history: [] };
+    }
+    const trackings = await this.searchRead('mail.tracking.value',
+      [['id', 'in', allTrackingIds], ['field_id', '=', fieldId]],
+      ['id', 'old_value_char', 'new_value_char', 'mail_message_id'],
+      { limit: options.limit ?? 50 });
+    // 把 tracking 关联回 message 时间
+    const msgById = new Map<number, OdooRecord>();
+    for (const m of messages.records) msgById.set(m['id'] as number, m);
+    const history = trackings.records.map(t => {
+      const msgArr = t['mail_message_id'];
+      const msgId = Array.isArray(msgArr) ? msgArr[0] as number : 0;
+      const msg = msgById.get(msgId);
+      return {
+        date: msg?.['date'],
+        author: msg?.['author_id'],
+        from: t['old_value_char'],
+        to: t['new_value_char'],
+      };
+    }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    return {
+      model: options.model, record_id: options.record_id,
+      field_name: options.field_name, history,
+    };
+  }
+
+  // ---------- 多公司联动 2 ----------
+
+  async switchCompany(companyId: number): Promise<{
+    user_id: number;
+    new_company_id: number;
+    new_company_name: string;
+    actions: string[];
+  }> {
+    const actions: string[] = [];
+    const uid = this.uid ?? 0;
+    // 检查 user 是否在该 company 的 allowed list
+    const me = (await this.read('res.users', [uid], ['company_ids']))[0];
+    const allowed = Array.isArray(me?.['company_ids']) ? me['company_ids'] as number[] : [];
+    if (!allowed.includes(companyId)) {
+      throw new Error(`user #${uid} 没有切到公司 #${companyId} 的权限`);
+    }
+    // 写 res.users.company_id
+    await this.write('res.users', [uid], { company_id: companyId });
+    actions.push(`已切换 res.users.company_id → #${companyId}`);
+    // 读公司名
+    const company = (await this.read('res.company', [companyId], ['name']))[0];
+    return {
+      user_id: uid,
+      new_company_id: companyId,
+      new_company_name: String(company?.['name'] ?? ''),
+      actions,
+    };
+  }
+
+  async getConsolidatedDashboard(options: {
+    company_ids?: number[];              // 不填用 user 的 company_ids
+    date_from?: string;
+    date_to?: string;
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    by_company: Array<{
+      company: unknown;
+      sales: number;
+      receivables: number;
+      open_helpdesk: number;
+      headcount: number;
+    }>;
+    grand_total: {
+      sales: number;
+      receivables: number;
+      open_helpdesk: number;
+      headcount: number;
+    };
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    let companyIds = options.company_ids;
+    if (!companyIds || companyIds.length === 0) {
+      const me = (await this.read('res.users', [this.uid ?? 0], ['company_ids']))[0];
+      companyIds = Array.isArray(me?.['company_ids']) ? me['company_ids'] as number[] : [];
+    }
+    if (companyIds.length === 0) {
+      return {
+        period: { from: dFrom, to: dTo },
+        by_company: [],
+        grand_total: { sales: 0, receivables: 0, open_helpdesk: 0, headcount: 0 },
+      };
+    }
+    const companies = await this.read('res.company', companyIds, ['id', 'name']);
+    const byCompany = await Promise.all(companies.map(async c => {
+      const cid = c['id'] as number;
+      const [salesAgg, recvAgg, helpdeskCnt, hcCnt] = await Promise.all([
+        this.readGroup('sale.order',
+          [['company_id', '=', cid],
+           ['date_order', '>=', `${dFrom} 00:00:00`],
+           '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+          ['amount_total:sum'], [], { limit: 1 }),
+        this.readGroup('account.move',
+          [['company_id', '=', cid],
+           ['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+           ['payment_state', 'in', ['not_paid', 'partial']]],
+          ['amount_residual:sum'], [], { limit: 1 }),
+        this.searchCount('helpdesk.ticket',
+          [['company_id', '=', cid], ['close_date', '=', false]]).catch(() => 0),
+        this.searchCount('hr.employee',
+          [['company_id', '=', cid], ['active', '=', true]]),
+      ]);
+      const sales = Array.isArray(salesAgg) && salesAgg[0]
+        ? Number((salesAgg[0] as Record<string, unknown>)['amount_total'] ?? 0) : 0;
+      const recv = Array.isArray(recvAgg) && recvAgg[0]
+        ? Number((recvAgg[0] as Record<string, unknown>)['amount_residual'] ?? 0) : 0;
+      return { company: [cid, c['name']], sales, receivables: recv,
+               open_helpdesk: helpdeskCnt, headcount: hcCnt };
+    }));
+    const grand = byCompany.reduce((acc, r) => ({
+      sales: acc.sales + r.sales,
+      receivables: acc.receivables + r.receivables,
+      open_helpdesk: acc.open_helpdesk + r.open_helpdesk,
+      headcount: acc.headcount + r.headcount,
+    }), { sales: 0, receivables: 0, open_helpdesk: 0, headcount: 0 });
+    return { period: { from: dFrom, to: dTo }, by_company: byCompany, grand_total: grand };
+  }
+
+  // ---------- 报表深化 2 ----------
+
+  async getPivotData(options: {
+    model: string;
+    measures: string[];                  // 如 ['amount_total:sum', 'qty:sum']
+    groupby: string[];                   // 1-2 维分组
+    domain?: Domain;
+    limit?: number;
+    orderby?: string;
+  }): Promise<{
+    model: string;
+    measures: string[];
+    groupby: string[];
+    rows: Record<string, unknown>[];
+    total: Record<string, number>;
+  }> {
+    const groups = await this.readGroup(
+      options.model, options.domain ?? [],
+      options.measures, options.groupby,
+      { limit: options.limit ?? 200, orderby: options.orderby });
+    // 算总计
+    const total: Record<string, number> = {};
+    for (const m of options.measures) {
+      const fname = m.split(':')[0]!;
+      total[fname] = groups.reduce((s: number, g: Record<string, unknown>) =>
+        s + Number(g[fname] ?? 0), 0);
+    }
+    return {
+      model: options.model,
+      measures: options.measures,
+      groupby: options.groupby,
+      rows: groups,
+      total,
+    };
+  }
+
+  async getEmailLog(options: {
+    state?: 'outgoing' | 'sent' | 'received' | 'exception' | 'cancel';
+    days?: number;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const days = options.days ?? 7;
+    const dateFrom = (() => {
+      const d = new Date(); d.setDate(d.getDate() - days);
+      return d.toISOString().substring(0, 19).replace('T', ' ');
+    })();
+    const domain: Domain = [['create_date', '>=', dateFrom]];
+    if (options.state) domain.push(['state', '=', options.state]);
+    const result = await this.searchRead('mail.mail', domain,
+      ['id', 'subject', 'email_from', 'email_to', 'state', 'create_date',
+       'date', 'failure_type', 'failure_reason'],
+      { limit: options.limit ?? 50, order: 'create_date desc' });
+    return result.records;
+  }
+
+  // ---------- 外部集成 3 ----------
+
+  async createWebhookAction(values: {
+    name: string;
+    model_id: number;                    // ir.model id
+    webhook_url: string;
+    webhook_field_ids?: number[];        // ir.model.fields ids
+    automation: {                        // 自动包装一个 base.automation 触发
+      trigger: 'on_create' | 'on_write' | 'on_create_or_write';
+      filter_domain?: string;
+    };
+  }): Promise<{ server_action_id: number; automation_id: number; actions: string[] }> {
+    const actions: string[] = [];
+    // 第 1 步：创建 ir.actions.server with state='webhook'
+    const serverActionPayload: Record<string, unknown> = {
+      name: values.name,
+      model_id: values.model_id,
+      state: 'webhook',
+      webhook_url: values.webhook_url,
+    };
+    if (values.webhook_field_ids && values.webhook_field_ids.length > 0) {
+      serverActionPayload['webhook_field_ids'] = [[6, 0, values.webhook_field_ids]];
+    }
+    const serverActionId = await this.create('ir.actions.server', serverActionPayload);
+    actions.push(`创建 webhook server action #${serverActionId}`);
+
+    // 第 2 步：创建 base.automation 触发 server action
+    const automationPayload: Record<string, unknown> = {
+      name: `${values.name}（webhook 触发器）`,
+      model_id: values.model_id,
+      trigger: values.automation.trigger,
+      action_server_ids: [[6, 0, [serverActionId]]],
+      active: true,
+    };
+    if (values.automation.filter_domain) {
+      automationPayload['filter_domain'] = values.automation.filter_domain;
+    }
+    const automationId = await this.create('base.automation', automationPayload);
+    actions.push(`创建 automation #${automationId} 关联到 server action`);
+    return { server_action_id: serverActionId, automation_id: automationId, actions };
+  }
+
+  async getRecordShareUrl(options: {
+    model: string;
+    record_id: number;
+  }): Promise<{
+    model: string;
+    record_id: number;
+    portal_url: string | null;
+    backend_url: string;
+  }> {
+    // 优先尝试 record.get_portal_url（mail.thread.portal_mixin 的方法）
+    let portalUrl: string | null = null;
+    try {
+      const result = await this.call(options.model, 'get_portal_url', [[options.record_id]]) as string | string[];
+      portalUrl = typeof result === 'string' ? result
+                  : Array.isArray(result) ? String(result[0] ?? '') : null;
+      if (portalUrl && !portalUrl.startsWith('http')) {
+        portalUrl = `${this.url}${portalUrl}`;
+      }
+    } catch {
+      // 不支持 portal mixin 就 null
+    }
+    const backendUrl = `${this.url}/odoo/action-base.action_open_view?model=${encodeURIComponent(options.model)}&id=${options.record_id}`;
+    return {
+      model: options.model,
+      record_id: options.record_id,
+      portal_url: portalUrl,
+      backend_url: backendUrl,
+    };
+  }
+
+  async getMailQueue(): Promise<{
+    pending_outgoing: number;
+    failed: number;
+    sent_today: number;
+    samples_outgoing: OdooRecord[];
+    samples_failed: OdooRecord[];
+  }> {
+    const todayStr = today();
+    const [pending, failed, sentToday, samplesOut, samplesFailed] = await Promise.all([
+      this.searchCount('mail.mail', [['state', '=', 'outgoing']]),
+      this.searchCount('mail.mail', [['state', '=', 'exception']]),
+      this.searchCount('mail.mail',
+        [['state', '=', 'sent'], ['date', '>=', `${todayStr} 00:00:00`]]),
+      this.searchRead('mail.mail', [['state', '=', 'outgoing']],
+        ['id', 'subject', 'email_to', 'create_date'],
+        { limit: 5, order: 'create_date desc' }),
+      this.searchRead('mail.mail', [['state', '=', 'exception']],
+        ['id', 'subject', 'email_to', 'failure_reason', 'create_date'],
+        { limit: 5, order: 'create_date desc' }),
+    ]);
+    return {
+      pending_outgoing: pending,
+      failed,
+      sent_today: sentToday,
+      samples_outgoing: samplesOut.records,
+      samples_failed: samplesFailed.records,
+    };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

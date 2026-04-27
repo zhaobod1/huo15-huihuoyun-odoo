@@ -3408,6 +3408,354 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // Studio 元编程 + 审计 + 多公司 + 报表 + 集成（v1.18 新增 14 个）
+  //   Studio 4 + 审计 3 + 多公司 2 + 报表 2 + 集成 3
+  // ══════════════════════════════════════════════════════
+
+  // ---------- Studio 元编程 4 ----------
+
+  api.registerTool({
+    name: 'odoo_model_list',
+    description: '查询 ir.model 模型列表。可按 keyword（模型名 / 描述）+ only_custom 筛选自定义模型 + transient 筛 wizard 模型。给上层定位某模型用。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:     { type: 'string', description: '模型名 / 描述模糊搜索' },
+        only_custom: { type: 'boolean', description: '只看自定义（state=manual）' },
+        transient:   { type: 'boolean', description: '是否 wizard 类（TransientModel）' },
+        limit:       { type: 'number', description: '默认 100' },
+      },
+    },
+    async handler(p: { keyword?: string; only_custom?: boolean; transient?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getModels(p);
+        return { success: true, count: records.length, models: records.map(r => ({
+          id: r['id'], name: r['name'], model: r['model'],
+          state: r['state'], info: r['info'],
+          transient: r['transient'], abstract: r['abstract'], order: r['order'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_model_fields',
+    description: '查某模型的所有字段（ir.model.fields）。可按 keyword 搜字段名/描述 + only_custom 筛 x_* 自定义字段。返回 ttype / required / relation / selection / translate 等元数据。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:       { type: 'string', description: '模型技术名（必填）' },
+        keyword:     { type: 'string', description: '字段名 / 描述模糊搜索' },
+        only_custom: { type: 'boolean', description: '只看自定义字段' },
+        limit:       { type: 'number', description: '默认 200' },
+      },
+      required: ['model'],
+    },
+    async handler(p: { model: string; keyword?: string; only_custom?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getModelFields(p.model, p);
+        return { success: true, count: records.length, fields: records.map(r => ({
+          id: r['id'], name: r['name'], description: r['field_description'],
+          type: r['ttype'], required: r['required'], readonly: r['readonly'],
+          relation: r['relation'], selection: r['selection'],
+          state: r['state'], translate: r['translate'], help: r['help'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_model_create',
+    description: '【系统管理员 / Studio】创建自定义模型（ir.model）。model 技术名必须 x_ 开头（Odoo 强制约束）。state 自动设为 manual。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:      { type: 'string', description: '模型显示名（必填，如"客户回访记录"）' },
+        model:     { type: 'string', description: '技术名（必填，必须 x_ 开头，如 x_customer_visit）' },
+        transient: { type: 'boolean', description: '是否 wizard 模型，默认 false' },
+        abstract:  { type: 'boolean', description: '是否抽象模型，默认 false' },
+      },
+      required: ['name', 'model'],
+    },
+    async handler(p: { name: string; model: string; transient?: boolean; abstract?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createModel(p);
+        return { success: true, id, message: `自定义模型 #${id}（${p.model} - ${p.name}）已创建。如需加字段调 odoo_field_create。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_field_create',
+    description: '【系统管理员 / Studio】给某模型加字段（ir.model.fields）。name 必须 x_ 开头。ttype 决定字段类型（many2one/many2many/one2many 必填 relation；selection 必填 selection）。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:             { type: 'string', description: '目标模型技术名（必填）' },
+        name:              { type: 'string', description: '字段技术名（必填，x_ 开头）' },
+        field_description: { type: 'string', description: '字段显示名（必填）' },
+        ttype:             { type: 'string', enum: ['char','text','integer','float','monetary','boolean','date','datetime','binary','selection','many2one','one2many','many2many','html'], description: '字段类型（必填）' },
+        required:          { type: 'boolean', description: '是否必填，默认 false' },
+        relation:          { type: 'string', description: 'many2one/many2many/one2many 必填，目标模型技术名' },
+        selection:         { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'selection 必填，[[key, label], ...]' },
+        help:              { type: 'string', description: '提示文字' },
+        translate:         { type: 'boolean', description: '是否多语言翻译' },
+      },
+      required: ['model', 'name', 'field_description', 'ttype'],
+    },
+    async handler(p: { model: string; name: string; field_description: string; ttype: 'char'|'text'|'integer'|'float'|'monetary'|'boolean'|'date'|'datetime'|'binary'|'selection'|'many2one'|'one2many'|'many2many'|'html'; required?: boolean; relation?: string; selection?: Array<[string,string]>; help?: string; translate?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createModelField(p);
+        return { success: true, id, message: `字段 #${id}（${p.model}.${p.name}，${p.ttype}）已创建。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 审计与变更追踪 3 ----------
+
+  api.registerTool({
+    name: 'odoo_audit_log',
+    description: '查某条记录的全部变更历史（mail.message + mail.tracking.value 联表）。返回每次变更：date / author / field / old_value / new_value。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:     { type: 'string', description: '模型技术名（必填）' },
+        record_id: { type: 'number', description: '记录 id（必填）' },
+        limit:     { type: 'number', description: '默认 100 条 message' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getAuditLog(p);
+        return { success: true, change_count: data.changes.length, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_login_history',
+    description: '查用户登录历史（res.users.log，每次登录留一条）。可按 user_id 筛某用户，days 默认 30。',
+    schema: {
+      type: 'object',
+      properties: {
+        user_id: { type: 'number', description: '用户 id，不填默认当前用户' },
+        days:    { type: 'number', description: '近 N 天，默认 30' },
+        limit:   { type: 'number', description: '默认 100' },
+      },
+    },
+    async handler(p: { user_id?: number; days?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getLoginHistory(p);
+        return { success: true, count: records.length, logins: records.map(r => ({
+          id: r['id'], user: r['user_id'], at: r['create_date'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_field_history',
+    description: '【聚焦视图】查某条记录某个字段的所有变更历史。比 odoo_audit_log 更聚焦——只返这一个字段的 from→to 变化序列。用于"X 的 stage 变过几次"、"工资改过几次"。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:      { type: 'string', description: '模型技术名（必填）' },
+        record_id:  { type: 'number', description: '记录 id（必填）' },
+        field_name: { type: 'string', description: '字段技术名（必填）' },
+        limit:      { type: 'number', description: '默认 50' },
+      },
+      required: ['model', 'record_id', 'field_name'],
+    },
+    async handler(p: { model: string; record_id: number; field_name: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getFieldHistory(p);
+        return { success: true, change_count: data.history.length, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 多公司联动 2 ----------
+
+  api.registerTool({
+    name: 'odoo_company_switch',
+    description: '切换当前用户激活的公司（写 res.users.company_id）。需要 user 在该公司的 allowed company list 里。后续所有 RPC 默认按新公司过滤。',
+    schema: {
+      type: 'object',
+      properties: { company_id: { type: 'number', description: '目标公司 id（必填）' } },
+      required: ['company_id'],
+    },
+    async handler(p: { company_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.switchCompany(p.company_id);
+        return { success: true, ...result, message: `已切换到公司 #${result.new_company_id}（${result.new_company_name}）。${result.actions.join('；')}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_consolidated_dashboard',
+    description: '【集团视角】跨公司聚合仪表盘：按 company_ids（不填用 user.company_ids）汇总每家公司的销售/应收/工单/在编 4 项 + 集团 grand_total。',
+    schema: {
+      type: 'object',
+      properties: {
+        company_ids: { type: 'array', items: { type: 'number' }, description: '公司 id 数组，不填用我的 allowed_company_ids' },
+        date_from:   { type: 'string', description: 'YYYY-MM-DD，默认本月初' },
+        date_to:     { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+      },
+    },
+    async handler(p: { company_ids?: number[]; date_from?: string; date_to?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getConsolidatedDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 报表深化 2 ----------
+
+  api.registerTool({
+    name: 'odoo_pivot_data',
+    description: '通用 pivot 数据查询（read_group 通用入口）。measures 是 ["amount_total:sum", "qty:sum"] 这种"字段:聚合函数"。groupby 是 1-2 维分组字段。返回 rows + total 总计。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:    { type: 'string', description: '模型技术名（必填）' },
+        measures: { type: 'array', items: { type: 'string' }, description: '聚合字段，如 ["amount_total:sum"]（必填）' },
+        groupby:  { type: 'array', items: { type: 'string' }, description: '分组维度（必填，1-2 个）' },
+        domain:   { type: 'array', description: 'Odoo domain 过滤（可选）' },
+        limit:    { type: 'number', description: '默认 200' },
+        orderby:  { type: 'string', description: '排序，如 "amount_total desc"' },
+      },
+      required: ['model', 'measures', 'groupby'],
+    },
+    async handler(p: { model: string; measures: string[]; groupby: string[]; domain?: unknown[]; limit?: number; orderby?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getPivotData({
+          model: p.model, measures: p.measures, groupby: p.groupby,
+          domain: (p.domain ?? []) as Parameters<typeof client.getPivotData>[0]['domain'],
+          limit: p.limit, orderby: p.orderby,
+        });
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_email_log',
+    description: '查邮件发送日志（mail.mail），按 state 筛 outgoing/sent/exception/cancel。days 默认 7。用于排查"邮件没发出去"。',
+    schema: {
+      type: 'object',
+      properties: {
+        state: { type: 'string', enum: ['outgoing','sent','received','exception','cancel'], description: '邮件状态' },
+        days:  { type: 'number', description: '近 N 天，默认 7' },
+        limit: { type: 'number', description: '默认 50' },
+      },
+    },
+    async handler(p: { state?: 'outgoing'|'sent'|'received'|'exception'|'cancel'; days?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getEmailLog(p);
+        return { success: true, count: records.length, mails: records.map(r => ({
+          id: r['id'], subject: r['subject'], from: r['email_from'], to: r['email_to'],
+          state: r['state'], created: r['create_date'], sent: r['date'],
+          failure_type: r['failure_type'], failure_reason: r['failure_reason'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 外部集成 3 ----------
+
+  api.registerTool({
+    name: 'odoo_webhook_create',
+    description: '【系统管理员】创建出站 Webhook：通过 ir.actions.server (state=webhook) + base.automation 触发器组合。当目标模型记录创建/更新/删除时 POST 到 webhook_url。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:               { type: 'string', description: 'webhook 名（必填）' },
+        model_id:           { type: 'number', description: 'ir.model id 监听的模型（必填）' },
+        webhook_url:        { type: 'string', description: 'POST 目标 URL（必填）' },
+        webhook_field_ids:  { type: 'array', items: { type: 'number' }, description: '要发送的 ir.model.fields ids（不填只发 _name）' },
+        trigger:            { type: 'string', enum: ['on_create','on_write','on_create_or_write'], description: '触发器类型（必填）' },
+        filter_domain:      { type: 'string', description: 'Odoo domain 字符串筛选触发条件' },
+      },
+      required: ['name', 'model_id', 'webhook_url', 'trigger'],
+    },
+    async handler(p: { name: string; model_id: number; webhook_url: string; webhook_field_ids?: number[]; trigger: 'on_create'|'on_write'|'on_create_or_write'; filter_domain?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.createWebhookAction({
+          name: p.name, model_id: p.model_id, webhook_url: p.webhook_url,
+          webhook_field_ids: p.webhook_field_ids,
+          automation: { trigger: p.trigger, filter_domain: p.filter_domain },
+        });
+        return { success: true, ...result, message: result.actions.join('；') };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_record_share_url',
+    description: '生成某条记录的分享链接：优先尝试 portal_url（mail.thread.portal_mixin 提供，外部可访问）+ 始终返回 backend_url（后台登录态访问）。用于"把这个商机/工单链接发给客户/同事"。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:     { type: 'string', description: '模型技术名（必填）' },
+        record_id: { type: 'number', description: '记录 id（必填）' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getRecordShareUrl(p);
+        const msg = data.portal_url
+          ? `Portal 链接（外部可访问）：${data.portal_url}\n后台链接：${data.backend_url}`
+          : `仅后台链接（该模型不支持 portal）：${data.backend_url}`;
+        return { success: true, ...data, message: msg };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_mail_queue',
+    description: '【运维】邮件队列健康检查：返回 outgoing 待发数、exception 失败数、今日已发数、+ 5 个待发样本 + 5 个失败样本（含 failure_reason）。一句话排查"为什么我的邮件没发出去"。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getMailQueue();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -4808,7 +5156,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 175 个工具已注册（v1.17 — 自动化/数据治理/批量操作/集成：base.automation+cron + 重复检测+完整性+合并 + 批量邮件/归档/指派 + 多语言/自定义字段/用户与权限组）');
+  api.logger.info('[odoo] 189 个工具已注册（v1.18 — Studio 元编程+审计+多公司+通用报表+外部集成：ir.model/ir.model.fields 创建 + mail.tracking.value 变更追踪 + company_switch + pivot_data + webhook 创建 + portal 分享 + 邮件队列健康）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -4926,6 +5274,11 @@ function registerHooks(api: OpenClawPluginApi) {
 **数据治理（v1.17）**：odoo_data_quality_partners · odoo_data_quality_products · odoo_data_quality_completeness · odoo_partners_merge
 **批量操作（v1.17）**：odoo_batch_email · odoo_batch_archive · odoo_batch_assign
 **集成 / 治理（v1.17）**：odoo_translate_record · odoo_custom_fields · odoo_user_create · odoo_user_groups
+**Studio 元编程（v1.18）**：odoo_model_list · odoo_model_fields · odoo_model_create · odoo_field_create
+**审计与变更追踪（v1.18）**：odoo_audit_log · odoo_login_history · odoo_field_history
+**多公司联动（v1.18）**：odoo_company_switch · odoo_consolidated_dashboard
+**通用报表（v1.18）**：odoo_pivot_data · odoo_email_log
+**外部集成（v1.18）**：odoo_webhook_create · odoo_record_share_url · odoo_mail_queue
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -5102,6 +5455,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 自定义字段 / x_ 开头的 / Studio 字段 | **odoo_custom_fields** |
 | 创建系统用户 / 给这个员工建账号 | **odoo_user_create** |
 | 看用户权限 / 我有哪些组 / 用户组 | **odoo_user_groups** |
+| 系统里有哪些模型 / 列模型 / Studio 模型 | **odoo_model_list** |
+| 看某模型的字段 / 这模型有哪些字段 | **odoo_model_fields** |
+| 创建自定义模型 / 加新表 / Studio 新建模型 | **odoo_model_create** |
+| 加自定义字段 / 给模型加字段 | **odoo_field_create** |
+| 这条记录改过什么 / 看变更历史 / 审计日志 | **odoo_audit_log** |
+| 谁登录过 / 登录记录 / login history | **odoo_login_history** |
+| 这字段改过几次 / 字段变更历史 | **odoo_field_history** |
+| 切换公司 / 切到 X 公司 / 改公司 | **odoo_company_switch** |
+| 集团合并报表 / 跨公司汇总 / 多公司视图 | **odoo_consolidated_dashboard** |
+| 数据透视 / pivot / 按维度聚合 | **odoo_pivot_data** |
+| 邮件日志 / 看邮件发送 / 邮件失败 | **odoo_email_log** |
+| 配 webhook / 出站 webhook / 创建 webhook | **odoo_webhook_create** |
+| 把这条记录链接发我 / 分享给客户 / portal 链接 | **odoo_record_share_url** |
+| 邮件队列 / 邮件为啥没发 / mail queue 健康 | **odoo_mail_queue** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
