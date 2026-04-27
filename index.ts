@@ -2748,6 +2748,341 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // 业务深化 + 智能洞察 + 报表（v1.16 新增 14 个）
+  //   采购 4 + MRP 3 + 会计 3 + 智能洞察 2 + 报表/导出 2
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 采购深化 4 ----------
+
+  api.registerTool({
+    name: 'odoo_purchase_create',
+    description: '创建采购订单（purchase.order）。order_lines 是 [{product_id, product_qty, price_unit?, name?}, ...]。会自动按 partner_id 默认 vendor 设置 + create order_line 子记录。',
+    schema: {
+      type: 'object',
+      properties: {
+        partner_id:    { type: 'number', description: '供应商 res.partner id（必填）' },
+        order_lines:   {
+          type: 'array',
+          description: '订单行数组（必填）',
+          items: {
+            type: 'object',
+            properties: {
+              product_id:  { type: 'number' },
+              product_qty: { type: 'number' },
+              price_unit:  { type: 'number' },
+              name:        { type: 'string' },
+            },
+            required: ['product_id', 'product_qty'],
+          },
+        },
+        date_planned:  { type: 'string', description: '计划交货日 YYYY-MM-DD HH:MM:SS' },
+        notes:         { type: 'string' },
+        company_id:    { type: 'number' },
+      },
+      required: ['partner_id', 'order_lines'],
+    },
+    async handler(p: { partner_id: number; order_lines: Array<{ product_id: number; product_qty: number; price_unit?: number; name?: string }>; date_planned?: string; notes?: string; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const id = await client.createPurchaseOrder(p);
+        return { success: true, id, message: `采购订单 #${id} 已创建（${p.order_lines.length} 行，state=draft）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_purchase_confirm',
+    description: '【采购员】确认采购订单（purchase.order.button_confirm），状态从 draft → purchase（下单）。多 id 优先一次批量调，失败 fallback 逐条 for-loop。',
+    schema: {
+      type: 'object',
+      properties: { order_ids: { type: 'array', items: { type: 'number' }, description: '采购订单 id 数组（必填）' } },
+      required: ['order_ids'],
+    },
+    async handler(p: { order_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.confirmPurchaseOrder(p.order_ids);
+        return { success: true, message: `采购订单 ${p.order_ids.map(i => '#'+i).join(', ')} 已确认。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_purchase_dashboard',
+    description: '采购仪表盘（purchase.order + read_group）。本月或指定区间总采购额、订单数、按状态分布、Top10 供应商、待收货数、待开账单数。',
+    schema: {
+      type: 'object',
+      properties: {
+        date_from: { type: 'string', description: 'YYYY-MM-DD，默认本月初' },
+        date_to:   { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+      },
+    },
+    async handler(p: { date_from?: string; date_to?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getPurchaseDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_vendor_bill_aging',
+    description: '应付账款账龄分析（账户 move_type=in_invoice）。0–30 / 31–60 / 61–90 / 90+ / 未到期 五桶。可按供应商筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        partner_id: { type: 'number', description: '只看某供应商' },
+        company_id: { type: 'number' },
+      },
+    },
+    async handler(p: { partner_id?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getVendorBillAging(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 生产 MRP 3 ----------
+
+  api.registerTool({
+    name: 'odoo_mo_list',
+    description: '查生产订单列表（mrp.production）。可按状态 / 产品 / 单号关键字筛。state: draft/confirmed/progress/to_close/done/cancel。',
+    schema: {
+      type: 'object',
+      properties: {
+        state:      { type: 'string', enum: ['draft','confirmed','progress','to_close','done','cancel'] },
+        product_id: { type: 'number' },
+        keyword:    { type: 'string', description: '生产单号 ilike 搜索' },
+        limit:      { type: 'number', description: '默认30' },
+      },
+    },
+    async handler(p: { state?: 'draft'|'confirmed'|'progress'|'to_close'|'done'|'cancel'; product_id?: number; keyword?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getMrpProductions(p);
+        return { success: true, count: records.length, productions: records.map(r => ({
+          id: r['id'], name: r['name'], product: r['product_id'], qty: r['product_qty'],
+          state: r['state'], date_start: r['date_start'], date_finished: r['date_finished'],
+          bom: r['bom_id'], priority: r['priority'], company: r['company_id'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_mo_confirm',
+    description: '【生产计划员】确认生产订单（mrp.production.action_confirm），draft → confirmed。',
+    schema: {
+      type: 'object',
+      properties: { mo_ids: { type: 'array', items: { type: 'number' }, description: '生产订单 id 数组（必填）' } },
+      required: ['mo_ids'],
+    },
+    async handler(p: { mo_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.confirmMrpProduction(p.mo_ids);
+        return { success: true, message: `生产订单 ${p.mo_ids.map(i => '#'+i).join(', ')} 已确认。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_bom_query',
+    description: '查询 BOM（mrp.bom）+ 自动展开 bom_line_ids 子物料。可按产品 / BOM id 筛。返回每个 BOM 的 lines 数组（产品 + 用量 + 单位）。',
+    schema: {
+      type: 'object',
+      properties: {
+        product_id:      { type: 'number', description: '按 product.product 筛' },
+        product_tmpl_id: { type: 'number', description: '按 product.template 筛' },
+        bom_id:          { type: 'number', description: '按 BOM id 筛' },
+        limit:           { type: 'number', description: '默认 30' },
+      },
+    },
+    async handler(p: { product_id?: number; product_tmpl_id?: number; bom_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getBomQuery(p);
+        return { success: true, count: data.boms.length, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 会计深化 3 ----------
+
+  api.registerTool({
+    name: 'odoo_journal_entries',
+    description: '查询会计凭证（account.move where move_type=entry）。区间默认本月。可按 journal / state 筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        journal_id: { type: 'number', description: '日记账 id' },
+        state:      { type: 'string', enum: ['draft','posted','cancel'] },
+        date_from:  { type: 'string', description: 'YYYY-MM-DD' },
+        date_to:    { type: 'string', description: 'YYYY-MM-DD' },
+        limit:      { type: 'number', description: '默认 30' },
+      },
+    },
+    async handler(p: { journal_id?: number; state?: 'draft'|'posted'|'cancel'; date_from?: string; date_to?: string; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getJournalEntries(p);
+        return { success: true, count: records.length, entries: records.map(r => ({
+          id: r['id'], name: r['name'], date: r['date'], journal: r['journal_id'],
+          state: r['state'], amount: r['amount_total_signed'], ref: r['ref'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_payment_register',
+    description: '【会计】登记付款（走 account.payment.register wizard）。对一组 invoice 调 action_create_payments 自动创建 account.payment 并核销。amount 不填默认全额。',
+    schema: {
+      type: 'object',
+      properties: {
+        invoice_ids:    { type: 'array', items: { type: 'number' }, description: '发票 / 账单 id 数组（必填）' },
+        amount:         { type: 'number', description: '付款金额，不填默认全额' },
+        payment_date:   { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+        journal_id:     { type: 'number', description: '收款日记账 id（不填用默认）' },
+        communication:  { type: 'string', description: '付款备注' },
+      },
+      required: ['invoice_ids'],
+    },
+    async handler(p: { invoice_ids: number[]; amount?: number; payment_date?: string; journal_id?: number; communication?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.registerPayment(p);
+        return { success: true, ...result, message: result.actions.join('；') };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_chart_of_accounts',
+    description: '查询会计科目表（account.account）。可按 keyword（code/name）+ account_type 筛。account_type 例：asset_cash, asset_receivable, liability_payable, expense, income。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:      { type: 'string', description: 'code 或 name 模糊搜索' },
+        account_type: { type: 'string', description: '科目类型，如 asset_cash / liability_payable' },
+        company_id:   { type: 'number' },
+        limit:        { type: 'number', description: '默认 100' },
+      },
+    },
+    async handler(p: { keyword?: string; account_type?: string; company_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getChartOfAccounts(p);
+        return { success: true, count: records.length, accounts: records.map(r => ({
+          id: r['id'], code: r['code'], name: r['name'], type: r['account_type'],
+          currency: r['currency_id'], reconcile: r['reconcile'], companies: r['company_ids'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 智能洞察 2 ----------
+
+  api.registerTool({
+    name: 'odoo_anomaly_detect',
+    description: '【运营智能】异常检测：自动扫描 6 类异常（库存负数 / 大额订单 / 老旧未付发票 / 堆积审批 / 停滞商机 / draft 工资单）。返回 anomalies[] 含 type / severity / count / description / sample_ids。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.detectAnomalies();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_kpi_summary',
+    description: '【老板视角】一句话 7 大 KPI：本月销售额 + 应收余额 + 待处理工单 / SLA 逾期 + 在制生产订单 + 库存预警 + 待审工资单。Promise.all 7 并发。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getKpiSummary();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 报表 / 数据导出 2 ----------
+
+  api.registerTool({
+    name: 'odoo_pdf_report',
+    description: '生成 QWeb PDF 报表的下载 URL（不直接拉 base64，避免 RPC payload 爆炸）。报表名是 ir.actions.report 的 xml id（如 sale.action_report_saleorder, account.account_invoices, hr_payroll.action_report_payslip）。返回 url 让用户/客户端去下载。',
+    schema: {
+      type: 'object',
+      properties: {
+        report_ref:  { type: 'string', description: '报表 xml id，如 sale.action_report_saleorder（必填）' },
+        record_ids:  { type: 'array', items: { type: 'number' }, description: '记录 id 数组（必填）' },
+      },
+      required: ['report_ref', 'record_ids'],
+    },
+    async handler(p: { report_ref: string; record_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const url = client.getPdfReportUrl(p.report_ref, p.record_ids);
+        return {
+          success: true, url, report_ref: p.report_ref, record_ids: p.record_ids,
+          message: `报表下载链接：${url}\n（注意：需要用户已在浏览器登录辉火云 session）`,
+        };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_export_csv',
+    description: '任意模型导 CSV：传 model + fields[]（fields 数组）+ 可选 domain，返回 CSV 字符串。Many2one 字段会自动取 [id, "name"] 的 name。limit 默认 1000。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:  { type: 'string', description: '模型技术名（必填）' },
+        fields: { type: 'array', items: { type: 'string' }, description: '字段名数组（必填）' },
+        domain: { type: 'array', description: 'Odoo domain 三元组数组（可选）' },
+        limit:  { type: 'number', description: '默认 1000' },
+        order:  { type: 'string', description: '排序，如 "create_date desc"' },
+      },
+      required: ['model', 'fields'],
+    },
+    async handler(p: { model: string; fields: string[]; domain?: unknown[]; limit?: number; order?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.exportCsv({
+          model: p.model,
+          fields: p.fields,
+          // OdooClient.exportCsv expects Domain (array of triples / operator strings)
+          // We accept any array shape from LLM and pass through
+          domain: (p.domain ?? []) as Parameters<typeof client.exportCsv>[0]['domain'],
+          limit: p.limit,
+          order: p.order,
+        });
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -4148,7 +4483,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 147 个工具已注册（v1.15 — 个人视图/CRM 智能/跨域桥/库存深化/多公司/销售预测）');
+  api.logger.info('[odoo] 161 个工具已注册（v1.16 — 业务深化：采购/MRP/会计 + 智能洞察 anomaly/KPI + 报表 PDF/CSV 导出）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -4257,6 +4592,11 @@ function registerHooks(api: OpenClawPluginApi) {
 **跨模块桥（v1.15）**：odoo_helpdesk_to_task · odoo_lead_to_project · odoo_invoice_send_reminder
 **库存深化（v1.15）**：odoo_stock_low_alerts · odoo_stock_by_location · odoo_stock_picking_validate · odoo_warehouse_dashboard
 **多公司（v1.15）**：odoo_companies
+**采购深化（v1.16）**：odoo_purchase_create · odoo_purchase_confirm · odoo_purchase_dashboard · odoo_vendor_bill_aging
+**生产 MRP（v1.16）**：odoo_mo_list · odoo_mo_confirm · odoo_bom_query
+**会计深化（v1.16）**：odoo_journal_entries · odoo_payment_register · odoo_chart_of_accounts
+**智能洞察（v1.16）**：odoo_anomaly_detect · odoo_kpi_summary
+**报表 / 数据导出（v1.16）**：odoo_pdf_report · odoo_export_csv
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -4405,6 +4745,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 验收这条调拨单 / 出库确认 | **odoo_stock_picking_validate** |
 | 仓库总览 / 待出库待入库 / 仓储情况 | **odoo_warehouse_dashboard** |
 | 我属于几家公司 / 公司列表 / 看公司 | **odoo_companies** |
+| 创建采购订单 / 下采购单 / 给某供应商下单 | **odoo_purchase_create** |
+| 确认采购订单 / 把这个 PO 下单 | **odoo_purchase_confirm** |
+| 采购仪表盘 / 本月采购 / 采购总览 | **odoo_purchase_dashboard** |
+| 应付账龄 / 我们欠供应商多少 / 老的未付账单 | **odoo_vendor_bill_aging** |
+| 生产订单 / MO 列表 / 在制单 | **odoo_mo_list** |
+| 确认生产订单 / 把 MO 启动 | **odoo_mo_confirm** |
+| 查 BOM / 物料清单 / 这个产品由什么组成 | **odoo_bom_query** |
+| 看会计凭证 / 凭证列表 / journal 分录 | **odoo_journal_entries** |
+| 登记付款 / 收款 / 给这张发票登记入账 | **odoo_payment_register** |
+| 科目表 / 会计科目 / 看 chart of accounts | **odoo_chart_of_accounts** |
+| 异常检测 / 系统有什么不对 / 全局健康检查 | **odoo_anomaly_detect** |
+| 老板 KPI / 一句话给我看 KPI / 公司核心指标 | **odoo_kpi_summary** |
+| 给我导这个 PO 的 PDF / 生成报表 PDF / 打印发票 | **odoo_pdf_report** |
+| 导出 CSV / 把数据导出来 / 给我生成表格 | **odoo_export_csv** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 

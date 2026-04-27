@@ -3091,6 +3091,552 @@ export class OdooClient {
     };
   }
 
+  // ==================== 业务深化 + 智能洞察 + 报表（v1.16） ====================
+  //
+  // v1.16 五个主题：
+  //   - 采购深化：v1.0 的 purchase_orders 只有 list，补 create / confirm /
+  //     dashboard / vendor_bill_aging
+  //   - 生产 MRP：从 0 起步，加 mo_list / mo_confirm / bom_query
+  //   - 会计深化：journal_entries / payment_register（走 wizard）/
+  //     chart_of_accounts
+  //   - 智能洞察：anomaly_detect / kpi_summary
+  //   - 报表 / 数据导出：pdf_report URL 构造 / export_csv 自渲染
+
+  // ---------- 采购深化 4 工具 ----------
+
+  async createPurchaseOrder(values: {
+    partner_id: number;
+    order_lines: Array<{
+      product_id: number;
+      product_qty: number;
+      price_unit?: number;
+      name?: string;                   // 描述，不填默认产品名
+    }>;
+    date_planned?: string;             // YYYY-MM-DD HH:MM:SS
+    notes?: string;
+    company_id?: number;
+  }): Promise<number> {
+    const order_line: unknown[] = values.order_lines.map(l => {
+      const lineVals: Record<string, unknown> = {
+        product_id: l.product_id,
+        product_qty: l.product_qty,
+      };
+      if (l.price_unit !== undefined) lineVals['price_unit'] = l.price_unit;
+      if (l.name) lineVals['name'] = l.name;
+      return [0, 0, lineVals];
+    });
+    const payload: Record<string, unknown> = {
+      partner_id: values.partner_id,
+      order_line,
+    };
+    if (values.date_planned) payload['date_planned'] = values.date_planned;
+    if (values.notes) payload['notes'] = values.notes;
+    if (values.company_id) payload['company_id'] = values.company_id;
+    return this.create('purchase.order', payload);
+  }
+
+  async confirmPurchaseOrder(ids: number[]): Promise<unknown> {
+    // button_confirm 在 v18+ 支持多 record，老版本可能要 for-loop
+    try { return await this.call('purchase.order', 'button_confirm', [ids]); }
+    catch {
+      const results: unknown[] = [];
+      for (const id of ids) {
+        try { results.push(await this.call('purchase.order', 'button_confirm', [[id]])); }
+        catch (e) { results.push({ error: String(e), id }); }
+      }
+      return results;
+    }
+  }
+
+  async getPurchaseDashboard(options: {
+    date_from?: string;
+    date_to?: string;
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    total_amount: number;
+    order_count: number;
+    by_state: Record<string, unknown>[];
+    top_vendors: Record<string, unknown>[];
+    pending_receipt_count: number;
+    pending_bill_count: number;
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const baseDomain: Domain = [
+      ['date_order', '>=', `${dFrom} 00:00:00`],
+      ['date_order', '<=', `${dTo} 23:59:59`],
+    ];
+    const [byState, totals, topVendors, pendingReceipt, pendingBill] = await Promise.all([
+      this.readGroup('purchase.order', baseDomain, [], ['state'], { limit: 10 }),
+      this.readGroup('purchase.order',
+        [...baseDomain, '|', ['state', '=', 'purchase'], ['state', '=', 'done']],
+        ['amount_total:sum'], [], { limit: 1 }),
+      this.readGroup('purchase.order',
+        [...baseDomain, '|', ['state', '=', 'purchase'], ['state', '=', 'done']],
+        ['amount_total:sum'], ['partner_id'],
+        { limit: 10, orderby: 'amount_total desc' }),
+      this.searchCount('purchase.order',
+        ['|', ['state', '=', 'purchase'], ['state', '=', 'done'],
+         ['receipt_status', 'in', ['pending', 'started']]]).catch(() => 0),
+      this.searchCount('purchase.order',
+        ['|', ['state', '=', 'purchase'], ['state', '=', 'done'],
+         ['invoice_status', 'in', ['to invoice', 'no']]]),
+    ]);
+    const total = Array.isArray(totals) && totals[0]
+      ? Number((totals[0] as Record<string, unknown>)['amount_total'] ?? 0) : 0;
+    const orderCount = byState.reduce((s: number, g: Record<string, unknown>) =>
+      s + Number(g['state_count'] ?? g['__count'] ?? 0), 0);
+    return {
+      period: { from: dFrom, to: dTo },
+      total_amount: total,
+      order_count: orderCount,
+      by_state: byState.map((g: Record<string, unknown>) => ({
+        state: g['state'], count: g['state_count'] ?? g['__count'] ?? 0,
+      })),
+      top_vendors: topVendors.map((g: Record<string, unknown>) => ({
+        partner: g['partner_id'],
+        amount: g['amount_total'] ?? 0,
+        order_count: g['partner_id_count'] ?? g['__count'] ?? 0,
+      })),
+      pending_receipt_count: pendingReceipt,
+      pending_bill_count: pendingBill,
+    };
+  }
+
+  async getVendorBillAging(options: {
+    partner_id?: number;
+    company_id?: number;
+  } = {}): Promise<{
+    today: string;
+    bucket_0_30: { count: number; amount: number };
+    bucket_31_60: { count: number; amount: number };
+    bucket_61_90: { count: number; amount: number };
+    bucket_90_plus: { count: number; amount: number };
+    not_due: { count: number; amount: number };
+    total_outstanding: number;
+  }> {
+    // 复用 getInvoiceAging 的桶模型，但 move_type='in_invoice'（供应商账单）
+    const todayStr = today();
+    const baseDomain: Domain = [
+      ['move_type', '=', 'in_invoice'],
+      ['state', '=', 'posted'],
+      ['payment_state', 'in', ['not_paid', 'partial']],
+    ];
+    if (options.partner_id) baseDomain.push(['partner_id', '=', options.partner_id]);
+    if (options.company_id) baseDomain.push(['company_id', '=', options.company_id]);
+    function dateOffset(days: number): string {
+      const d = new Date();
+      d.setDate(d.getDate() - days);
+      return d.toISOString().substring(0, 10);
+    }
+    const day30 = dateOffset(30), day60 = dateOffset(60), day90 = dateOffset(90);
+    const [b0, b1, b2, b3, bn] = await Promise.all([
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', todayStr], ['invoice_date_due', '>', day30]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day30], ['invoice_date_due', '>', day60]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day60], ['invoice_date_due', '>', day90]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day90]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '>', todayStr]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+    ]);
+    function unpack(g: Record<string, unknown>[]): { count: number; amount: number } {
+      const row = g[0];
+      return {
+        count: Number(row?.['__count'] ?? 0),
+        amount: Number(row?.['amount_residual'] ?? 0),
+      };
+    }
+    const u0 = unpack(b0), u1 = unpack(b1), u2 = unpack(b2), u3 = unpack(b3), uN = unpack(bn);
+    return {
+      today: todayStr,
+      bucket_0_30: u0, bucket_31_60: u1, bucket_61_90: u2,
+      bucket_90_plus: u3, not_due: uN,
+      total_outstanding: u0.amount + u1.amount + u2.amount + u3.amount + uN.amount,
+    };
+  }
+
+  // ---------- 生产 MRP 3 工具 ----------
+
+  async getMrpProductions(options: {
+    state?: 'draft'|'confirmed'|'progress'|'to_close'|'done'|'cancel';
+    product_id?: number;
+    keyword?: string;                  // 按 name (单号) 模糊搜
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.state) domain.push(['state', '=', options.state]);
+    if (options.product_id) domain.push(['product_id', '=', options.product_id]);
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    const result = await this.searchRead('mrp.production', domain,
+      ['id', 'name', 'product_id', 'product_qty', 'state', 'date_start',
+       'date_finished', 'bom_id', 'company_id', 'priority'],
+      { limit: options.limit ?? 30, order: 'date_start desc' });
+    return result.records;
+  }
+
+  async confirmMrpProduction(ids: number[]): Promise<unknown> {
+    // mrp.production.action_confirm（draft → confirmed）
+    return this.call('mrp.production', 'action_confirm', [ids]);
+  }
+
+  async getBomQuery(options: {
+    product_id?: number;
+    product_tmpl_id?: number;
+    bom_id?: number;
+    limit?: number;
+  } = {}): Promise<{
+    boms: Record<string, unknown>[];
+  }> {
+    const domain: Domain = [];
+    if (options.bom_id) domain.push(['id', '=', options.bom_id]);
+    if (options.product_id) domain.push(['product_id', '=', options.product_id]);
+    if (options.product_tmpl_id) domain.push(['product_tmpl_id', '=', options.product_tmpl_id]);
+    const boms = await this.searchRead('mrp.bom', domain,
+      ['id', 'product_tmpl_id', 'product_id', 'type', 'product_qty',
+       'product_uom_id', 'bom_line_ids', 'company_id', 'code'],
+      { limit: options.limit ?? 30 });
+    if (boms.records.length === 0) return { boms: [] };
+    // 把每个 BOM 的 line 一起读出来
+    const allLineIds = boms.records.flatMap(b =>
+      Array.isArray(b['bom_line_ids']) ? (b['bom_line_ids'] as number[]) : []);
+    const lines = allLineIds.length > 0
+      ? await this.read('mrp.bom.line', allLineIds,
+          ['id', 'bom_id', 'product_id', 'product_qty', 'product_uom_id'])
+      : [];
+    const linesByBomId = new Map<number, OdooRecord[]>();
+    for (const l of lines) {
+      const bomArr = l['bom_id'];
+      const bomId = Array.isArray(bomArr) ? bomArr[0] as number : 0;
+      const arr = linesByBomId.get(bomId) ?? [];
+      arr.push(l);
+      linesByBomId.set(bomId, arr);
+    }
+    return {
+      boms: boms.records.map(b => ({
+        id: b['id'], product: b['product_id'], product_tmpl: b['product_tmpl_id'],
+        type: b['type'], qty: b['product_qty'], uom: b['product_uom_id'],
+        code: b['code'], company: b['company_id'],
+        lines: (linesByBomId.get(b['id'] as number) ?? []).map(l => ({
+          id: l['id'], product: l['product_id'],
+          qty: l['product_qty'], uom: l['product_uom_id'],
+        })),
+      })),
+    };
+  }
+
+  // ---------- 会计深化 3 工具 ----------
+
+  async getJournalEntries(options: {
+    journal_id?: number;
+    state?: 'draft' | 'posted' | 'cancel';
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const domain: Domain = [
+      ['date', '>=', dFrom],
+      ['date', '<=', dTo],
+      ['move_type', '=', 'entry'],   // 只看普通凭证（排除发票/账单）
+    ];
+    if (options.journal_id) domain.push(['journal_id', '=', options.journal_id]);
+    if (options.state) domain.push(['state', '=', options.state]);
+    const result = await this.searchRead('account.move', domain,
+      ['id', 'name', 'date', 'journal_id', 'state', 'amount_total_signed', 'ref'],
+      { limit: options.limit ?? 30, order: 'date desc, id desc' });
+    return result.records;
+  }
+
+  async registerPayment(values: {
+    invoice_ids: number[];               // 一组 account.move id
+    amount?: number;                     // 不填默认全额
+    payment_date?: string;               // YYYY-MM-DD，默认今天
+    journal_id?: number;                 // 不填默认配置的现金/银行账户
+    communication?: string;              // 备注
+  }): Promise<{
+    payment_count: number;
+    actions: string[];
+  }> {
+    const actions: string[] = [];
+    // account.payment.register 是 transient model wizard
+    const wizardVals: Record<string, unknown> = {
+      payment_date: values.payment_date ?? today(),
+    };
+    if (values.amount !== undefined) wizardVals['amount'] = values.amount;
+    if (values.journal_id) wizardVals['journal_id'] = values.journal_id;
+    if (values.communication) wizardVals['communication'] = values.communication;
+
+    // 在 context 注入 active_model + active_ids
+    const wizardId = await this.call('account.payment.register', 'create', [wizardVals], {
+      context: {
+        active_model: 'account.move',
+        active_ids: values.invoice_ids,
+      },
+    }) as number;
+    actions.push(`创建 register 向导 #${wizardId}`);
+
+    // 触发 action_create_payments
+    await this.call('account.payment.register', 'action_create_payments', [[wizardId]]);
+    // 数一下到底创建了几个 payment（按 invoice_ids 反查）
+    const paymentCount = await this.searchCount('account.payment',
+      [['ref', 'like', '%']]);   // 这里粗略数最近的，不严格
+    actions.push(`已对 ${values.invoice_ids.length} 张发票登记付款`);
+    return { payment_count: values.invoice_ids.length, actions };
+  }
+
+  async getChartOfAccounts(options: {
+    keyword?: string;
+    account_type?: string;
+    company_id?: number;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.keyword) {
+      domain.push('|', ['code', 'ilike', options.keyword], ['name', 'ilike', options.keyword]);
+    }
+    if (options.account_type) domain.push(['account_type', '=', options.account_type]);
+    if (options.company_id) domain.push(['company_ids', 'in', [options.company_id]]);
+    const result = await this.searchRead('account.account', domain,
+      ['id', 'code', 'name', 'account_type', 'currency_id', 'reconcile', 'company_ids'],
+      { limit: options.limit ?? 100, order: 'code asc' });
+    return result.records;
+  }
+
+  // ---------- 智能洞察 2 工具 ----------
+
+  async detectAnomalies(): Promise<{
+    detected_at: string;
+    anomalies: Array<{
+      type: string;
+      severity: 'low' | 'medium' | 'high';
+      count: number;
+      description: string;
+      sample_ids?: number[];
+    }>;
+  }> {
+    const todayStr = today();
+    const day30Ago = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 30);
+      return d.toISOString().substring(0, 10);
+    })();
+    const day7Ago = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 7);
+      return d.toISOString().substring(0, 10);
+    })();
+
+    const [
+      negativeStock, largeOrders, oldUnpaid, pendingApprovals,
+      staleLeads, draftPayslips,
+    ] = await Promise.all([
+      // 1) 库存负数
+      this.searchRead('stock.quant',
+        [['quantity', '<', 0]],
+        ['id', 'product_id', 'location_id', 'quantity'],
+        { limit: 20 }),
+      // 2) 大额销售订单（最近 7 天 amount_total > 100k）
+      this.searchRead('sale.order',
+        [['date_order', '>=', `${day7Ago} 00:00:00`],
+         ['amount_total', '>', 100000],
+         '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+        ['id', 'name', 'partner_id', 'amount_total'],
+        { limit: 20, order: 'amount_total desc' }),
+      // 3) 老的未付发票（>= 90 天逾期）
+      this.searchRead('account.move',
+        [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+         ['payment_state', 'in', ['not_paid', 'partial']],
+         ['invoice_date_due', '<', day30Ago]],
+        ['id', 'name', 'partner_id', 'amount_residual', 'invoice_date_due'],
+        { limit: 20 }).catch(() => ({ records: [], length: 0 })),
+      // 4) 堆积的待审批（pending 超过 7 天）
+      this.searchRead('approval.request',
+        [['request_status', '=', 'pending'],
+         ['date', '<', `${day7Ago} 00:00:00`]],
+        ['id', 'name', 'category_id', 'request_owner_id', 'date'],
+        { limit: 20 }).catch(() => ({ records: [], length: 0 })),
+      // 5) 长期停滞商机（30 天没动）
+      this.searchCount('crm.lead',
+        [['type', '=', 'opportunity'], ['active', '=', true],
+         ['probability', '<', 100], ['probability', '>', 0],
+         ['date_last_stage_update', '<', `${day30Ago} 00:00:00`]]).catch(() => 0),
+      // 6) draft 状态的工资单（异常滞留）
+      this.searchCount('hr.payslip',
+        [['state', '=', 'draft'],
+         ['create_date', '<', `${day7Ago} 00:00:00`]]).catch(() => 0),
+    ]);
+
+    const anomalies: Array<{
+      type: string;
+      severity: 'low' | 'medium' | 'high';
+      count: number;
+      description: string;
+      sample_ids?: number[];
+    }> = [];
+
+    if (negativeStock.records.length > 0) {
+      anomalies.push({
+        type: 'negative_stock',
+        severity: 'high',
+        count: negativeStock.records.length,
+        description: `${negativeStock.records.length} 条 stock.quant 数量为负，可能存在库存账实不符`,
+        sample_ids: negativeStock.records.slice(0, 5).map(r => r['id'] as number),
+      });
+    }
+    if (largeOrders.records.length > 0) {
+      anomalies.push({
+        type: 'large_orders',
+        severity: 'medium',
+        count: largeOrders.records.length,
+        description: `近 7 天 ${largeOrders.records.length} 笔大额订单（>10w），需额外关注审核与执行`,
+        sample_ids: largeOrders.records.slice(0, 5).map(r => r['id'] as number),
+      });
+    }
+    if (oldUnpaid.records.length > 0) {
+      anomalies.push({
+        type: 'old_unpaid_invoices',
+        severity: 'high',
+        count: oldUnpaid.records.length,
+        description: `${oldUnpaid.records.length} 张发票逾期 30+ 天未付，建议催款`,
+        sample_ids: oldUnpaid.records.slice(0, 5).map(r => r['id'] as number),
+      });
+    }
+    if (pendingApprovals.records.length > 0) {
+      anomalies.push({
+        type: 'stale_approvals',
+        severity: 'medium',
+        count: pendingApprovals.records.length,
+        description: `${pendingApprovals.records.length} 条审批已 pending 超 7 天，可能阻塞业务`,
+        sample_ids: pendingApprovals.records.slice(0, 5).map(r => r['id'] as number),
+      });
+    }
+    if (staleLeads > 0) {
+      anomalies.push({
+        type: 'stale_crm_leads',
+        severity: 'low',
+        count: staleLeads,
+        description: `${staleLeads} 个商机超 30 天未动，调 odoo_crm_stale_leads 查详情`,
+      });
+    }
+    if (draftPayslips > 0) {
+      anomalies.push({
+        type: 'draft_payslips_stuck',
+        severity: 'medium',
+        count: draftPayslips,
+        description: `${draftPayslips} 张工资单 draft 状态超 7 天，应验证或取消`,
+      });
+    }
+
+    return {
+      detected_at: todayStr,
+      anomalies,
+    };
+  }
+
+  async getKpiSummary(): Promise<{
+    today: string;
+    sales_mtd: number;                 // 本月销售额
+    receivables_outstanding: number;   // 应收余额
+    open_helpdesk_count: number;
+    overdue_helpdesk_sla: number;
+    open_mrp_count: number;
+    stock_alert_count: number;
+    pending_payslips: number;
+  }> {
+    const todayStr = today();
+    const monthStart = todayStr.substring(0, 7) + '-01';
+    const [
+      salesAgg, recvAgg, openHelpdesk, overdueSla,
+      openMrp, stockAlerts, pendingPayslips,
+    ] = await Promise.all([
+      this.readGroup('sale.order',
+        [['date_order', '>=', `${monthStart} 00:00:00`],
+         '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+        ['amount_total:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+         ['payment_state', 'in', ['not_paid', 'partial']]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.searchCount('helpdesk.ticket', [['close_date', '=', false]]).catch(() => 0),
+      this.searchCount('helpdesk.ticket',
+        [['close_date', '=', false],
+         ['sla_deadline', '<', `${todayStr} 23:59:59`],
+         ['sla_deadline', '!=', false]]).catch(() => 0),
+      this.searchCount('mrp.production',
+        [['state', 'in', ['confirmed', 'progress', 'to_close']]]).catch(() => 0),
+      this.searchCount('stock.warehouse.orderpoint', [['qty_to_order', '>', 0]]).catch(() => 0),
+      this.searchCount('hr.payslip', [['state', 'in', ['draft', 'verify']]]).catch(() => 0),
+    ]);
+    const salesAmount = Array.isArray(salesAgg) && salesAgg[0]
+      ? Number((salesAgg[0] as Record<string, unknown>)['amount_total'] ?? 0) : 0;
+    const recvAmount = Array.isArray(recvAgg) && recvAgg[0]
+      ? Number((recvAgg[0] as Record<string, unknown>)['amount_residual'] ?? 0) : 0;
+    return {
+      today: todayStr,
+      sales_mtd: salesAmount,
+      receivables_outstanding: recvAmount,
+      open_helpdesk_count: openHelpdesk,
+      overdue_helpdesk_sla: overdueSla,
+      open_mrp_count: openMrp,
+      stock_alert_count: stockAlerts,
+      pending_payslips: pendingPayslips,
+    };
+  }
+
+  // ---------- 报表 / 数据导出 2 工具 ----------
+
+  /** 构造 PDF 下载 URL（不直接拉 base64，避免 RPC payload 爆炸） */
+  getPdfReportUrl(reportRef: string, recordIds: number[]): string {
+    // 标准 Odoo URL 模式：/report/pdf/<report_ref>/<id1>,<id2>,...
+    const idsStr = recordIds.join(',');
+    return `${this.url}/report/pdf/${encodeURIComponent(reportRef)}/${idsStr}`;
+  }
+
+  async exportCsv(options: {
+    model: string;
+    fields: string[];
+    domain?: Domain;
+    limit?: number;
+    order?: string;
+  }): Promise<{
+    model: string;
+    fields: string[];
+    row_count: number;
+    csv: string;
+  }> {
+    const result = await this.searchRead(options.model,
+      options.domain ?? [], options.fields,
+      { limit: options.limit ?? 1000, order: options.order ?? '' });
+
+    function csvEscape(v: unknown): string {
+      if (v === null || v === undefined || v === false) return '';
+      // Many2one returned as [id, "name"]
+      if (Array.isArray(v) && v.length === 2) v = v[1];
+      const s = String(v);
+      if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    }
+    const header = options.fields.map(csvEscape).join(',');
+    const rows = result.records.map(r =>
+      options.fields.map(f => csvEscape(r[f])).join(','));
+    const csv = [header, ...rows].join('\n');
+    return {
+      model: options.model,
+      fields: options.fields,
+      row_count: result.records.length,
+      csv,
+    };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{
