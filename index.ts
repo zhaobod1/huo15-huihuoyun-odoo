@@ -2165,6 +2165,312 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // Analytics & Orchestration（v1.14 新增 14 个）
+  //   HR Analytics 3 + 入离职编排 2 + 工时审批 2 + 跨域仪表盘 4 +
+  //   项目分析 2 + 薪酬批次 1
+  // ══════════════════════════════════════════════════════
+
+  // ---------- HR Analytics 进阶（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_attendance_analytics',
+    description: '考勤分析（hr.attendance + read_group）。本月或指定区间内员工总工时分布、记录数、按员工聚合。可按部门或员工筛选。默认本月初到今天。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:   { type: 'number', description: '只看某员工' },
+        department_id: { type: 'number', description: '按部门筛' },
+        date_from:     { type: 'string', description: 'YYYY-MM-DD，默认本月初' },
+        date_to:       { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+      },
+    },
+    async handler(p: { employee_id?: number; department_id?: number; date_from?: string; date_to?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getAttendanceAnalytics(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_leave_analytics',
+    description: '请假趋势分析（hr.leave + read_group）。区间内按请假类型 + 状态分组，返回总天数。用于"本月谁请假最多"、"全公司请假数据"。',
+    schema: {
+      type: 'object',
+      properties: {
+        department_id: { type: 'number', description: '按部门筛' },
+        date_from:     { type: 'string', description: 'YYYY-MM-DD，默认本月初' },
+        date_to:       { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+      },
+    },
+    async handler(p: { department_id?: number; date_from?: string; date_to?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getLeaveAnalytics(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_turnover_metrics',
+    description: '入离职率指标。根据 hr.employee.create_date / archive 状态计算近 N 天入职数、离职数，年化 turnover_rate 和 attrition_rate。默认窗口 90 天。',
+    schema: {
+      type: 'object',
+      properties: { days: { type: 'number', description: '滑动窗口天数，默认90' } },
+    },
+    async handler(p: { days?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getTurnoverMetrics(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 入离职编排（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_employee_onboarding',
+    description: '【HR】入职编排：链式动作 = 创建员工 + 可选创建系统账号（res.users）+ 可选发送入职欢迎 chatter。比单独 odoo_employee_create 多覆盖账号绑定与欢迎流程。create_user=true 且 user_login 已填时会自动建账号。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:             { type: 'string', description: '员工姓名（必填）' },
+        work_email:       { type: 'string' },
+        work_phone:       { type: 'string' },
+        mobile_phone:     { type: 'string' },
+        job_title:        { type: 'string' },
+        department_id:    { type: 'number' },
+        job_id:           { type: 'number' },
+        parent_id:        { type: 'number', description: '上级 hr.employee id' },
+        user_id:          { type: 'number', description: '已有的 res.users id（如已建过账号）' },
+        work_location_id: { type: 'number' },
+        company_id:       { type: 'number' },
+        create_user:      { type: 'boolean', description: '是否同时建 res.users，默认 false' },
+        user_login:       { type: 'string', description: '若 create_user=true 必填，新账号登录名' },
+        welcome_message:  { type: 'string', description: '可选，入职欢迎语，会发到员工的 chatter' },
+      },
+      required: ['name'],
+    },
+    async handler(p: { name: string; [k: string]: unknown }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.employeeOnboarding(p as Parameters<typeof client.employeeOnboarding>[0]);
+        return { success: true, ...result, message: `员工 #${result.employee_id}（${p.name}）入职已完成。${result.actions.join('；')}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_employee_offboarding',
+    description: '【HR】离职编排：链式动作 = （可选）转移直接下属给 new_manager_id +（可选）拒掉所有未批的请假 +（可选）chatter 留言 + archive 员工。new_manager_id 不填则不转移。',
+    schema: {
+      type: 'object',
+      properties: {
+        employee_id:           { type: 'number', description: '离职员工 id（必填）' },
+        new_manager_id:        { type: 'number', description: '把直接下属转给的新经理 hr.employee id' },
+        leaving_message:       { type: 'string', description: 'chatter 留言（如"X 离职日期 YYYY-MM-DD，工作交接联系 ...）"' },
+        refuse_pending_leaves: { type: 'boolean', description: '是否自动拒绝未批请假，默认 false' },
+      },
+      required: ['employee_id'],
+    },
+    async handler(p: { employee_id: number; new_manager_id?: number; leaving_message?: string; refuse_pending_leaves?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.employeeOffboarding(p);
+        return { success: true, ...result, message: `员工 #${p.employee_id} 离职流程完成：${result.actions.join('；')}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 工时审批闭环（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_timesheet_validate',
+    description: '【经理 / timesheet_grid 模块】验证工时（account.analytic.line.action_validate_timesheet）。工时一旦 validated=true 后员工不能再改。要求 timesheet_grid 企业模块已安装。',
+    schema: {
+      type: 'object',
+      properties: { line_ids: { type: 'array', items: { type: 'number' }, description: '工时行 id 数组（必填）' } },
+      required: ['line_ids'],
+    },
+    async handler(p: { line_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.validateTimesheets(p.line_ids);
+        return { success: true, message: `工时 ${p.line_ids.map(i => '#'+i).join(', ')} 已验证。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_timesheet_invalidate',
+    description: '【经理 / timesheet_grid 模块】撤销工时验证（action_invalidate_timesheet）。validated=false 让员工可以重新编辑。',
+    schema: {
+      type: 'object',
+      properties: { line_ids: { type: 'array', items: { type: 'number' }, description: '工时行 id 数组（必填）' } },
+      required: ['line_ids'],
+    },
+    async handler(p: { line_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.invalidateTimesheets(p.line_ids);
+        return { success: true, message: `工时 ${p.line_ids.map(i => '#'+i).join(', ')} 已撤销验证。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 跨域仪表盘（4 个） ----------
+
+  api.registerTool({
+    name: 'odoo_sales_dashboard',
+    description: '销售仪表盘（sale.order + read_group）。区间内总销售额、订单数、按状态分布、Top10 客户、待开票数、待发货数。默认本月初到今天。',
+    schema: {
+      type: 'object',
+      properties: {
+        date_from: { type: 'string', description: 'YYYY-MM-DD，默认本月初' },
+        date_to:   { type: 'string', description: 'YYYY-MM-DD，默认今天' },
+      },
+    },
+    async handler(p: { date_from?: string; date_to?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getSalesDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_crm_pipeline_health',
+    description: 'CRM 漏斗健康（crm.lead + read_group）。返回阶段分布 / 销售员分布 / 平均概率 / 总管道金额 / 逾期商机数与金额。user_id 不填看全员；days_overdue 默认 0（今天前未跟进的算逾期）。',
+    schema: {
+      type: 'object',
+      properties: {
+        user_id:      { type: 'number', description: '只看某销售员 res.users id' },
+        days_overdue: { type: 'number', description: '逾期容忍天数，默认 0（今天就算）' },
+      },
+    },
+    async handler(p: { user_id?: number; days_overdue?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getCrmPipelineHealth(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_invoice_aging',
+    description: '应收账款账龄分析（account.move）。把未付/部分付的客户发票按 0–30 / 31–60 / 61–90 / 90+ 天逾期分桶 + 未到期。可按客户筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        partner_id: { type: 'number', description: '只看某客户 res.partner id' },
+        company_id: { type: 'number', description: '公司 id' },
+      },
+    },
+    async handler(p: { partner_id?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getInvoiceAging(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_helpdesk_dashboard',
+    description: 'Helpdesk 仪表盘（helpdesk.ticket + read_group）。未关闭工单数、按 stage / priority / 处理人分布、SLA 逾期数、紧急（priority=3）开放数。可按 team_id / user_id 筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        team_id: { type: 'number', description: '客服团队 id' },
+        user_id: { type: 'number', description: '处理人 res.users id' },
+      },
+    },
+    async handler(p: { team_id?: number; user_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getHelpdeskDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 项目仪表盘 + 我的工作负荷（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_project_dashboard',
+    description: '项目仪表盘（project.project + project.task）。返回项目列表（含任务数）+ 任务总览（开放/完成/逾期）。可按 project_id 单独看一个项目。',
+    schema: {
+      type: 'object',
+      properties: { project_id: { type: 'number', description: '只看某项目' } },
+    },
+    async handler(p: { project_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getProjectDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_my_workload',
+    description: '我的工作负荷一览：当前 user 的开放任务数 / 逾期任务 / 待办活动 / 工单 / 待审批 / 今日日历。一句话回答"我手上还有多少活"。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getMyWorkload();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 薪酬批次（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_payslip_run_create',
+    description: '【HR】创建工资单批次（hr.payslip.run），可选 auto_generate=true 同时调 generate_payslips 批量生成 hr.payslip。需要 hr_payroll.group_hr_payroll_user 权限。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:          { type: 'string', description: '批次名，如"2026 年 4 月工资"（必填）' },
+        date_start:    { type: 'string', description: 'YYYY-MM-DD（必填）' },
+        date_end:      { type: 'string', description: 'YYYY-MM-DD（必填）' },
+        company_id:    { type: 'number' },
+        employee_ids:  { type: 'array', items: { type: 'number' }, description: '员工 id 列表，配合 auto_generate' },
+        auto_generate: { type: 'boolean', description: '是否立即生成 payslip 行，默认 false' },
+      },
+      required: ['name', 'date_start', 'date_end'],
+    },
+    async handler(p: { name: string; date_start: string; date_end: string; company_id?: number; employee_ids?: number[]; auto_generate?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.createPayslipRun(p);
+        return { success: true, ...result, message: `批次 #${result.run_id} 创建完成（${result.payslip_count} 条 payslip）：${result.actions.join('；')}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -3565,7 +3871,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 119 个工具已注册（v1.13 — HR 全生命周期：员工 CRUD/入职离职/HR 仪表盘/部门岗位治理/合同版本/工时洞察/组织架构）');
+  api.logger.info('[odoo] 133 个工具已注册（v1.14 — Analytics & Orchestration：HR 进阶分析/入离职编排/工时审批/销售/CRM/账龄/工单/项目仪表盘 + 我的工作负荷 + 工资批次）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -3665,6 +3971,10 @@ function registerHooks(api: OpenClawPluginApi) {
 **HR 仪表盘 / 组织架构（v1.13）**：odoo_hr_dashboard · odoo_employee_org_chart · odoo_employee_versions
 **HR 部门 / 岗位 / 工作地点（v1.13）**：odoo_departments · odoo_department_create · odoo_jobs · odoo_job_create · odoo_work_locations
 **HR 工时洞察（v1.13）**：odoo_timesheet_summary · odoo_timesheet_team
+**HR Analytics 进阶（v1.14）**：odoo_attendance_analytics · odoo_leave_analytics · odoo_turnover_metrics
+**HR 编排（v1.14）**：odoo_employee_onboarding · odoo_employee_offboarding · odoo_payslip_run_create
+**工时审批（v1.14）**：odoo_timesheet_validate · odoo_timesheet_invalidate
+**跨域仪表盘（v1.14）**：odoo_sales_dashboard · odoo_crm_pipeline_health · odoo_invoice_aging · odoo_helpdesk_dashboard · odoo_project_dashboard · odoo_my_workload
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -3785,6 +4095,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 有哪些工作地点 / 办公室 / 远程地点 | **odoo_work_locations** |
 | 我这个月工时 / 项目工时聚合 / 工时分布 | **odoo_timesheet_summary** |
 | 我下属的工时 / 团队工时 / 谁工时少 | **odoo_timesheet_team** |
+| 考勤分析 / 这个月谁工时最多 / 部门考勤分布 | **odoo_attendance_analytics** |
+| 请假趋势 / 这个月请假数据 / 全公司请假统计 | **odoo_leave_analytics** |
+| 入离职率 / 流失率 / 近 3 个月人员变动 | **odoo_turnover_metrics** |
+| 入职新员工带账号带欢迎 / 一键入职 / 录入员工并建账号 | **odoo_employee_onboarding** |
+| 一键离职 / 离职转移下属 / 离职流程 | **odoo_employee_offboarding** |
+| 验证工时 / 批准工时 / lock 工时 | **odoo_timesheet_validate** |
+| 撤销工时验证 / 解锁工时 | **odoo_timesheet_invalidate** |
+| 销售概况 / 本月销售额 / Top 客户 | **odoo_sales_dashboard** |
+| CRM 漏斗健康 / 商机分布 / 逾期商机 / 平均概率 | **odoo_crm_pipeline_health** |
+| 应收账龄 / 账龄分析 / 谁欠款最多 / 90 天以上 | **odoo_invoice_aging** |
+| 工单仪表盘 / 客服情况 / SLA 逾期 | **odoo_helpdesk_dashboard** |
+| 项目仪表盘 / 项目总览 / 任务总数 | **odoo_project_dashboard** |
+| 我手上还有多少活 / 我的工作负荷 / 我的待办全图 | **odoo_my_workload** |
+| 创建本月工资批次 / 批量生成工资单 | **odoo_payslip_run_create** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 

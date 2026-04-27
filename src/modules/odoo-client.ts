@@ -1882,6 +1882,618 @@ export class OdooClient {
     };
   }
 
+  // ==================== Analytics & Orchestration（v1.14） ====================
+  //
+  // v1.14 核心：把 v1.13 的 dashboard 模式（read_group + Promise.all）
+  // 推广到所有主域，并加 onboarding/offboarding 编排工具。
+  //
+  // - HR Analytics 进阶：attendance / leave 趋势 / turnover
+  // - HR 编排：onboarding 一链式 / offboarding 转移下属
+  // - 工时审批闭环：action_validate_timesheet（来自 timesheet_grid 企业模块）
+  // - 跨域仪表盘：sales / crm pipeline health / invoice aging / helpdesk
+  // - 项目分析：project_dashboard / my_workload
+  // - 薪酬批次：payslip_run + generate_payslips
+
+  // ---------- HR Analytics 进阶 ----------
+
+  async getAttendanceAnalytics(options: {
+    employee_id?: number;            // 默认全员（HR 视角）
+    department_id?: number;
+    date_from?: string;              // YYYY-MM-DD，默认本月初
+    date_to?: string;                // YYYY-MM-DD，默认今天
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    total_records: number;
+    total_hours: number;
+    by_employee: Record<string, unknown>[];
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const domain: Domain = [
+      ['check_in', '>=', `${dFrom} 00:00:00`],
+      ['check_in', '<=', `${dTo} 23:59:59`],
+    ];
+    if (options.employee_id) domain.push(['employee_id', '=', options.employee_id]);
+    if (options.department_id) domain.push(['employee_id.department_id', '=', options.department_id]);
+    const [groups, totalCount] = await Promise.all([
+      this.readGroup('hr.attendance', domain, ['worked_hours:sum'], ['employee_id'], { limit: 200 }),
+      this.searchCount('hr.attendance', domain),
+    ]);
+    const totalHours = groups.reduce((s: number, g: Record<string, unknown>) => s + Number(g['worked_hours'] ?? 0), 0);
+    return {
+      period: { from: dFrom, to: dTo },
+      total_records: totalCount,
+      total_hours: totalHours,
+      by_employee: groups.map((g: Record<string, unknown>) => ({
+        employee: g['employee_id'],
+        hours: g['worked_hours'] ?? 0,
+        days: g['employee_id_count'] ?? g['__count'] ?? 0,
+      })),
+    };
+  }
+
+  async getLeaveAnalytics(options: {
+    department_id?: number;
+    date_from?: string;
+    date_to?: string;
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    by_type: Record<string, unknown>[];
+    by_state: Record<string, unknown>[];
+    total_days_taken: number;        // 已批准的总天数
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const domain: Domain = [
+      ['date_from', '>=', `${dFrom} 00:00:00`],
+      ['date_from', '<=', `${dTo} 23:59:59`],
+    ];
+    if (options.department_id) domain.push(['department_id', '=', options.department_id]);
+    const [byType, byState, validated] = await Promise.all([
+      this.readGroup('hr.leave', domain, ['number_of_days:sum'], ['holiday_status_id'], { limit: 50 }),
+      this.readGroup('hr.leave', domain, [], ['state'], { limit: 10 }),
+      this.readGroup('hr.leave',
+        [...domain, ['state', '=', 'validate']],
+        ['number_of_days:sum'], [], { limit: 1 }),
+    ]);
+    const total = Array.isArray(validated) && validated[0]
+      ? Number((validated[0] as Record<string, unknown>)['number_of_days'] ?? 0) : 0;
+    return {
+      period: { from: dFrom, to: dTo },
+      by_type: byType.map((g: Record<string, unknown>) => ({
+        type: g['holiday_status_id'],
+        days: g['number_of_days'] ?? 0,
+        count: g['holiday_status_id_count'] ?? g['__count'] ?? 0,
+      })),
+      by_state: byState.map((g: Record<string, unknown>) => ({
+        state: g['state'],
+        count: g['state_count'] ?? g['__count'] ?? 0,
+      })),
+      total_days_taken: total,
+    };
+  }
+
+  async getTurnoverMetrics(options: {
+    days?: number;                   // 滑动窗口长度，默认 90
+  } = {}): Promise<{
+    window: { from: string; to: string; days: number };
+    headcount_now: number;
+    hires_in_window: number;
+    departures_in_window: number;
+    turnover_rate: number;           // (hires + departures) / 2 / headcount * (365/days)
+    annualized_attrition_rate: number;  // departures / headcount * (365/days)
+  }> {
+    const days = options.days ?? 90;
+    const dTo = today();
+    const dFromDate = new Date();
+    dFromDate.setDate(dFromDate.getDate() - days);
+    const dFrom = dFromDate.toISOString().substring(0, 10);
+    // 在编人数（active=true）
+    // 入职 = 这个窗口内 create_date 落在窗口的 hr.employee
+    // 离职 = active=false 且 write_date 在窗口内（近似，因为没有正式离职日字段）
+    const [headcount, hires, departures] = await Promise.all([
+      this.searchCount('hr.employee', [['active', '=', true]]),
+      this.searchCount('hr.employee', [
+        ['create_date', '>=', `${dFrom} 00:00:00`],
+        ['create_date', '<=', `${dTo} 23:59:59`],
+      ]),
+      this.searchCount('hr.employee', [
+        ['active', '=', false],
+        ['write_date', '>=', `${dFrom} 00:00:00`],
+        ['write_date', '<=', `${dTo} 23:59:59`],
+      ]),
+    ]);
+    const turnover = headcount > 0
+      ? ((hires + departures) / 2 / headcount) * (365 / days)
+      : 0;
+    const attrition = headcount > 0
+      ? (departures / headcount) * (365 / days)
+      : 0;
+    return {
+      window: { from: dFrom, to: dTo, days },
+      headcount_now: headcount,
+      hires_in_window: hires,
+      departures_in_window: departures,
+      turnover_rate: Math.round(turnover * 1000) / 1000,
+      annualized_attrition_rate: Math.round(attrition * 1000) / 1000,
+    };
+  }
+
+  // ---------- 入离职编排 ----------
+
+  async employeeOnboarding(values: {
+    name: string;
+    work_email?: string;
+    work_phone?: string;
+    mobile_phone?: string;
+    job_title?: string;
+    department_id?: number;
+    job_id?: number;
+    parent_id?: number;
+    user_id?: number;
+    work_location_id?: number;
+    company_id?: number;
+    create_user?: boolean;           // true 时自动建 res.users（如果还没绑定）
+    user_login?: string;             // 配合 create_user
+    welcome_message?: string;        // 在 chatter 留一条入职欢迎
+  }): Promise<{
+    employee_id: number;
+    user_id: number | null;
+    actions: string[];
+  }> {
+    const actions: string[] = [];
+
+    // 1) 创建 employee
+    const empPayload: Record<string, unknown> = {
+      name: values.name,
+    };
+    for (const k of ['work_email','work_phone','mobile_phone','job_title','department_id','job_id','parent_id','user_id','work_location_id','company_id'] as const) {
+      const v = values[k];
+      if (v !== undefined) empPayload[k] = v;
+    }
+    const empId = await this.create('hr.employee', empPayload);
+    actions.push(`创建员工 #${empId}`);
+
+    // 2) 创建关联 res.users（可选）
+    let userId: number | null = (values.user_id as number | undefined) ?? null;
+    if (values.create_user && !userId && values.user_login) {
+      try {
+        userId = await this.create('res.users', {
+          login: values.user_login,
+          name: values.name,
+          email: values.work_email ?? values.user_login,
+        });
+        await this.write('hr.employee', [empId], { user_id: userId });
+        actions.push(`创建系统账号 res.users #${userId}`);
+      } catch (e) {
+        actions.push(`系统账号创建失败：${String(e)}`);
+      }
+    }
+
+    // 3) 写入欢迎 chatter
+    if (values.welcome_message) {
+      try {
+        await this.call('hr.employee', 'message_post', [[empId]], {
+          body: values.welcome_message,
+          message_type: 'comment',
+          subtype_xmlid: 'mail.mt_comment',
+        });
+        actions.push('已发送入职欢迎消息');
+      } catch (e) {
+        actions.push(`欢迎消息发送失败：${String(e)}`);
+      }
+    }
+
+    return { employee_id: empId, user_id: userId, actions };
+  }
+
+  async employeeOffboarding(values: {
+    employee_id: number;
+    new_manager_id?: number;         // 把下属转给 new_manager_id
+    leaving_message?: string;        // chatter 留言
+    refuse_pending_leaves?: boolean; // 自动拒掉未批的请假
+  }): Promise<{
+    employee_id: number;
+    actions: string[];
+  }> {
+    const actions: string[] = [];
+
+    // 1) 转移直接下属
+    if (values.new_manager_id) {
+      const reports = await this.searchRead('hr.employee',
+        [['parent_id', '=', values.employee_id], ['active', '=', true]],
+        ['id', 'name'], { limit: 200 });
+      const reportIds = reports.records.map(r => r['id'] as number);
+      if (reportIds.length > 0) {
+        await this.write('hr.employee', reportIds, { parent_id: values.new_manager_id });
+        actions.push(`已把 ${reportIds.length} 名下属转给经理 #${values.new_manager_id}`);
+      } else {
+        actions.push('没有需要转移的下属');
+      }
+    }
+
+    // 2) 拒绝未批的请假（可选）
+    if (values.refuse_pending_leaves) {
+      const pending = await this.searchRead('hr.leave',
+        [['employee_id', '=', values.employee_id],
+         '|', ['state', '=', 'confirm'], ['state', '=', 'validate1']],
+        ['id'], { limit: 100 });
+      for (const l of pending.records) {
+        try { await this.refuseLeave(l['id'] as number); }
+        catch { /* 个别失败不阻塞 */ }
+      }
+      if (pending.records.length > 0) {
+        actions.push(`已拒绝 ${pending.records.length} 条未批请假`);
+      }
+    }
+
+    // 3) chatter 留言
+    if (values.leaving_message) {
+      try {
+        await this.call('hr.employee', 'message_post', [[values.employee_id]], {
+          body: values.leaving_message,
+          message_type: 'comment',
+          subtype_xmlid: 'mail.mt_comment',
+        });
+        actions.push('已发送离职说明 chatter');
+      } catch { /* noop */ }
+    }
+
+    // 4) archive 员工（最后一步，避免前几步因 active=false 失败）
+    await this.write('hr.employee', [values.employee_id], { active: false });
+    actions.push(`员工 #${values.employee_id} 已归档`);
+
+    return { employee_id: values.employee_id, actions };
+  }
+
+  // ---------- 工时审批闭环（来自 timesheet_grid 企业模块） ----------
+
+  async validateTimesheets(ids: number[]): Promise<unknown> {
+    // 需要 timesheet_grid 已安装 + hr_timesheet.group_hr_timesheet_approver
+    return this.call('account.analytic.line', 'action_validate_timesheet', [ids]);
+  }
+
+  async invalidateTimesheets(ids: number[]): Promise<unknown> {
+    return this.call('account.analytic.line', 'action_invalidate_timesheet', [ids]);
+  }
+
+  // ---------- 销售仪表盘 ----------
+
+  async getSalesDashboard(options: {
+    date_from?: string;
+    date_to?: string;
+  } = {}): Promise<{
+    period: { from: string; to: string };
+    total_amount: number;
+    order_count: number;
+    by_state: Record<string, unknown>[];
+    top_customers: Record<string, unknown>[];
+    pending_invoice_count: number;   // 已确认但还没开票
+    pending_delivery_count: number;  // 已确认但还没发货
+  }> {
+    const todayStr = today();
+    const dFrom = options.date_from ?? todayStr.substring(0, 7) + '-01';
+    const dTo = options.date_to ?? todayStr;
+    const domain: Domain = [
+      ['date_order', '>=', `${dFrom} 00:00:00`],
+      ['date_order', '<=', `${dTo} 23:59:59`],
+    ];
+    const [byState, totals, topCust, pendingInv, pendingDel] = await Promise.all([
+      this.readGroup('sale.order', domain, [], ['state'], { limit: 10 }),
+      this.readGroup('sale.order',
+        [...domain, '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+        ['amount_total:sum'], [], { limit: 1 }),
+      this.readGroup('sale.order',
+        [...domain, '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+        ['amount_total:sum'], ['partner_id'], { limit: 10, orderby: 'amount_total desc' }),
+      this.searchCount('sale.order',
+        ['|', ['state', '=', 'sale'], ['state', '=', 'done'], ['invoice_status', '=', 'to invoice']]),
+      this.searchCount('sale.order',
+        ['|', ['state', '=', 'sale'], ['state', '=', 'done'], ['delivery_status', 'in', ['pending', 'started']]]).catch(() => 0),
+    ]);
+    const total = Array.isArray(totals) && totals[0]
+      ? Number((totals[0] as Record<string, unknown>)['amount_total'] ?? 0) : 0;
+    const orderCount = byState.reduce((s: number, g: Record<string, unknown>) =>
+      s + Number(g['state_count'] ?? g['__count'] ?? 0), 0);
+    return {
+      period: { from: dFrom, to: dTo },
+      total_amount: total,
+      order_count: orderCount,
+      by_state: byState.map((g: Record<string, unknown>) => ({
+        state: g['state'],
+        count: g['state_count'] ?? g['__count'] ?? 0,
+      })),
+      top_customers: topCust.map((g: Record<string, unknown>) => ({
+        partner: g['partner_id'],
+        amount: g['amount_total'] ?? 0,
+        order_count: g['partner_id_count'] ?? g['__count'] ?? 0,
+      })),
+      pending_invoice_count: pendingInv,
+      pending_delivery_count: pendingDel,
+    };
+  }
+
+  // ---------- CRM 漏斗健康 ----------
+
+  async getCrmPipelineHealth(options: {
+    user_id?: number;                // 不填默认所有人
+    days_overdue?: number;           // date_deadline < today - X 视为逾期，默认 0（今天就算）
+  } = {}): Promise<{
+    by_stage: Record<string, unknown>[];   // 阶段分布 + 总金额
+    by_user: Record<string, unknown>[];    // 销售员分布
+    overdue_count: number;
+    overdue_value: number;
+    avg_probability: number;
+    total_pipeline_value: number;
+  }> {
+    const todayStr = today();
+    const overdueDate = options.days_overdue
+      ? new Date(Date.now() - options.days_overdue * 86400000).toISOString().substring(0, 10)
+      : todayStr;
+    const domain: Domain = [['type', '=', 'opportunity'], ['active', '=', true]];
+    if (options.user_id) domain.push(['user_id', '=', options.user_id]);
+
+    const [byStage, byUser, overdueCount, overdueAgg, totalAgg] = await Promise.all([
+      this.readGroup('crm.lead', domain, ['expected_revenue:sum'], ['stage_id'], { limit: 30 }),
+      this.readGroup('crm.lead', domain, ['expected_revenue:sum'], ['user_id'], { limit: 30 }),
+      this.searchCount('crm.lead', [...domain, ['date_deadline', '<', overdueDate]]),
+      this.readGroup('crm.lead',
+        [...domain, ['date_deadline', '<', overdueDate]],
+        ['expected_revenue:sum'], [], { limit: 1 }),
+      this.readGroup('crm.lead', domain,
+        ['expected_revenue:sum', 'probability:avg'], [], { limit: 1 }),
+    ]);
+    const overdueVal = Array.isArray(overdueAgg) && overdueAgg[0]
+      ? Number((overdueAgg[0] as Record<string, unknown>)['expected_revenue'] ?? 0) : 0;
+    const totalVal = Array.isArray(totalAgg) && totalAgg[0]
+      ? Number((totalAgg[0] as Record<string, unknown>)['expected_revenue'] ?? 0) : 0;
+    const avgProb = Array.isArray(totalAgg) && totalAgg[0]
+      ? Number((totalAgg[0] as Record<string, unknown>)['probability'] ?? 0) : 0;
+    return {
+      by_stage: byStage.map((g: Record<string, unknown>) => ({
+        stage: g['stage_id'],
+        revenue: g['expected_revenue'] ?? 0,
+        count: g['stage_id_count'] ?? g['__count'] ?? 0,
+      })),
+      by_user: byUser.map((g: Record<string, unknown>) => ({
+        user: g['user_id'],
+        revenue: g['expected_revenue'] ?? 0,
+        count: g['user_id_count'] ?? g['__count'] ?? 0,
+      })),
+      overdue_count: overdueCount,
+      overdue_value: overdueVal,
+      avg_probability: Math.round(avgProb * 100) / 100,
+      total_pipeline_value: totalVal,
+    };
+  }
+
+  // ---------- 发票账龄分析 ----------
+
+  async getInvoiceAging(options: {
+    partner_id?: number;             // 只看某客户
+    company_id?: number;
+  } = {}): Promise<{
+    today: string;
+    bucket_0_30: { count: number; amount: number };
+    bucket_31_60: { count: number; amount: number };
+    bucket_61_90: { count: number; amount: number };
+    bucket_90_plus: { count: number; amount: number };
+    not_due: { count: number; amount: number };
+    total_outstanding: number;
+  }> {
+    const todayStr = today();
+    const baseDomain: Domain = [
+      ['move_type', '=', 'out_invoice'],
+      ['state', '=', 'posted'],
+      ['payment_state', 'in', ['not_paid', 'partial']],
+    ];
+    if (options.partner_id) baseDomain.push(['partner_id', '=', options.partner_id]);
+    if (options.company_id) baseDomain.push(['company_id', '=', options.company_id]);
+
+    function dateOffset(days: number): string {
+      const d = new Date();
+      d.setDate(d.getDate() - days);
+      return d.toISOString().substring(0, 10);
+    }
+    const day30 = dateOffset(30), day60 = dateOffset(60), day90 = dateOffset(90);
+
+    const [b0_30, b31_60, b61_90, b90p, notDue] = await Promise.all([
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', todayStr], ['invoice_date_due', '>', day30]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day30], ['invoice_date_due', '>', day60]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day60], ['invoice_date_due', '>', day90]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '<=', day90]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+      this.readGroup('account.move',
+        [...baseDomain, ['invoice_date_due', '>', todayStr]],
+        ['amount_residual:sum'], [], { limit: 1 }),
+    ]);
+
+    function unpack(g: Record<string, unknown>[]): { count: number; amount: number } {
+      const row = g[0] as Record<string, unknown> | undefined;
+      return {
+        count: Number(row?.['__count'] ?? 0),
+        amount: Number(row?.['amount_residual'] ?? 0),
+      };
+    }
+    const b0 = unpack(b0_30), b1 = unpack(b31_60), b2 = unpack(b61_90), b3 = unpack(b90p), bn = unpack(notDue);
+    return {
+      today: todayStr,
+      bucket_0_30: b0,
+      bucket_31_60: b1,
+      bucket_61_90: b2,
+      bucket_90_plus: b3,
+      not_due: bn,
+      total_outstanding: b0.amount + b1.amount + b2.amount + b3.amount + bn.amount,
+    };
+  }
+
+  // ---------- Helpdesk 仪表盘 ----------
+
+  async getHelpdeskDashboard(options: {
+    team_id?: number;
+    user_id?: number;
+  } = {}): Promise<{
+    open_count: number;
+    by_stage: Record<string, unknown>[];
+    by_priority: Record<string, unknown>[];
+    by_assignee: Record<string, unknown>[];
+    overdue_count: number;
+    high_priority_open: number;
+  }> {
+    const baseDomain: Domain = [['close_date', '=', false]];   // 未关闭
+    if (options.team_id) baseDomain.push(['team_id', '=', options.team_id]);
+    if (options.user_id) baseDomain.push(['user_id', '=', options.user_id]);
+
+    const todayStr = today();
+    const [openCount, byStage, byPrio, byUser, overdueCnt, highPrio] = await Promise.all([
+      this.searchCount('helpdesk.ticket', baseDomain),
+      this.readGroup('helpdesk.ticket', baseDomain, [], ['stage_id'], { limit: 30 }),
+      this.readGroup('helpdesk.ticket', baseDomain, [], ['priority'], { limit: 5 }),
+      this.readGroup('helpdesk.ticket', baseDomain, [], ['user_id'], { limit: 30 }),
+      this.searchCount('helpdesk.ticket',
+        [...baseDomain, ['sla_deadline', '<', `${todayStr} 23:59:59`], ['sla_deadline', '!=', false]]).catch(() => 0),
+      this.searchCount('helpdesk.ticket', [...baseDomain, ['priority', '=', '3']]),
+    ]);
+    return {
+      open_count: openCount,
+      by_stage: byStage.map((g: Record<string, unknown>) => ({
+        stage: g['stage_id'], count: g['stage_id_count'] ?? g['__count'] ?? 0,
+      })),
+      by_priority: byPrio.map((g: Record<string, unknown>) => ({
+        priority: g['priority'], count: g['priority_count'] ?? g['__count'] ?? 0,
+      })),
+      by_assignee: byUser.map((g: Record<string, unknown>) => ({
+        user: g['user_id'], count: g['user_id_count'] ?? g['__count'] ?? 0,
+      })),
+      overdue_count: overdueCnt,
+      high_priority_open: highPrio,
+    };
+  }
+
+  // ---------- 项目仪表盘 ----------
+
+  async getProjectDashboard(options: { project_id?: number } = {}): Promise<{
+    projects: Record<string, unknown>[];
+    total_tasks_open: number;
+    total_tasks_done: number;
+    overdue_tasks: number;
+  }> {
+    const projDomain: Domain = [['active', '=', true]];
+    if (options.project_id) projDomain.push(['id', '=', options.project_id]);
+    const projects = await this.searchRead('project.project', projDomain,
+      ['id', 'name', 'task_count', 'company_id'],
+      { limit: 50, order: 'name asc' });
+    const projIds = projects.records.map(p => p['id'] as number);
+    const taskBaseDomain: Domain = projIds.length > 0 ? [['project_id', 'in', projIds]] : [];
+    const todayStr = today();
+    const [openCount, doneCount, overdueCount] = await Promise.all([
+      this.searchCount('project.task',
+        [...taskBaseDomain, ['active', '=', true],
+         '|', ['state', 'in', ['01_in_progress', '02_changes_requested', '03_approved']],
+              ['state', '=', false]]).catch(() =>
+        this.searchCount('project.task', [...taskBaseDomain, ['stage_id.fold', '=', false]])),
+      this.searchCount('project.task',
+        [...taskBaseDomain, ['state', '=', '1_done']]).catch(() =>
+        this.searchCount('project.task', [...taskBaseDomain, ['stage_id.fold', '=', true]])),
+      this.searchCount('project.task',
+        [...taskBaseDomain, ['date_deadline', '<', todayStr], ['date_deadline', '!=', false]]),
+    ]);
+    return {
+      projects: projects.records.map(p => ({
+        id: p['id'], name: p['name'],
+        task_count: p['task_count'], company: p['company_id'],
+      })),
+      total_tasks_open: openCount,
+      total_tasks_done: doneCount,
+      overdue_tasks: overdueCount,
+    };
+  }
+
+  // ---------- 我的工作负荷 ----------
+
+  async getMyWorkload(): Promise<{
+    user_id: number;
+    open_tasks: number;
+    overdue_tasks: number;
+    pending_activities: number;
+    open_tickets: number;
+    pending_approvals: number;
+    today_calendar_events: number;
+  }> {
+    const uid = this.uid ?? 0;
+    const todayStr = today();
+    const [tasks, overdueTasks, activities, tickets, approvals, events] = await Promise.all([
+      this.searchCount('project.task',
+        [['user_ids', 'in', [uid]], ['active', '=', true]]),
+      this.searchCount('project.task',
+        [['user_ids', 'in', [uid]], ['active', '=', true],
+         ['date_deadline', '<', todayStr], ['date_deadline', '!=', false]]),
+      this.searchCount('mail.activity', [['user_id', '=', uid]]),
+      this.searchCount('helpdesk.ticket',
+        [['user_id', '=', uid], ['close_date', '=', false]]).catch(() => 0),
+      this.searchCount('approval.request',
+        [['approver_ids.user_id', '=', uid], ['request_status', '=', 'pending']]).catch(() => 0),
+      this.searchCount('calendar.event',
+        [['partner_ids.user_ids', 'in', [uid]],
+         ['start', '>=', `${todayStr} 00:00:00`],
+         ['start', '<=', `${todayStr} 23:59:59`]]).catch(() => 0),
+    ]);
+    return {
+      user_id: uid,
+      open_tasks: tasks,
+      overdue_tasks: overdueTasks,
+      pending_activities: activities,
+      open_tickets: tickets,
+      pending_approvals: approvals,
+      today_calendar_events: events,
+    };
+  }
+
+  // ---------- 薪酬批次 ----------
+
+  async createPayslipRun(values: {
+    name: string;
+    date_start: string;              // YYYY-MM-DD
+    date_end: string;                // YYYY-MM-DD
+    company_id?: number;
+    employee_ids?: number[];         // 不填则手动添加
+    auto_generate?: boolean;         // 创建后自动 generate_payslips
+  }): Promise<{ run_id: number; payslip_count: number; actions: string[] }> {
+    const actions: string[] = [];
+    const payload: Record<string, unknown> = {
+      name: values.name,
+      date_start: values.date_start,
+      date_end: values.date_end,
+    };
+    if (values.company_id) payload['company_id'] = values.company_id;
+    const runId = await this.create('hr.payslip.run', payload);
+    actions.push(`创建工资单批次 #${runId}`);
+
+    let payslipCount = 0;
+    if (values.auto_generate && values.employee_ids && values.employee_ids.length > 0) {
+      try {
+        await this.call('hr.payslip.run', 'generate_payslips', [[runId]], {
+          employee_ids: values.employee_ids,
+        });
+        payslipCount = await this.searchCount('hr.payslip', [['payslip_run_id', '=', runId]]);
+        actions.push(`已生成 ${payslipCount} 条 payslip`);
+      } catch (e) {
+        actions.push(`generate_payslips 失败：${String(e)}`);
+      }
+    }
+
+    return { run_id: runId, payslip_count: payslipCount, actions };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{
