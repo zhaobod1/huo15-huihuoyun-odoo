@@ -1,8 +1,8 @@
 {
   "id": "odoo",
   "name": "火一五·辉火云企业套件插件",
-  "description": "自然语言操作辉火云企业套件，企业级全场景 ERP 助手，161 个工具覆盖任务与指派、活动闭环、日历、邮件、内部动态 chatter、附件/文档、关注者、CRM、项目/里程碑、工单闭环、审批动作、财务、采购、生产、库存、HR、知识库、批量更新、撤销上一步；内置跨渠道通知基座（NotificationBus）；v1.10 共享凭据；v1.11–v1.13 HR 三步走；v1.14 Analytics & Orchestration；v1.15 个人视图 + CRM 智能 + 跨域桥 + 库存深化 + 多公司；v1.16 业务深化：采购完整闭环 + 生产 MRP + 会计深化（journal/payment_register wizard/chart_of_accounts）+ 智能洞察（anomaly_detect 6 类异常自动巡检 / kpi_summary 老板 7 大 KPI）+ 报表导出（QWeb PDF URL / 任意模型 CSV）",
-  "version": "1.16.0",
+  "description": "自然语言操作辉火云企业套件，企业级全场景 ERP 助手 + 自动化/数据治理/批量/集成，175 个工具覆盖销售/采购/库存/生产/会计/HR/项目/CRM/客服/知识/通知/智能/报表 13 域；v1.10 共享凭据；v1.11–v1.13 HR 三步走；v1.14 Analytics & Orchestration；v1.15 个人视图 + CRM 智能 + 跨域桥 + 库存深化 + 多公司；v1.16 业务深化（采购/MRP/会计 + 智能洞察 + 报表）；v1.17 自动化与治理：base.automation 列表+创建+ir.cron 列表 + 重复联系人/产品检测+字段完整性+partners_merge + 批量邮件/归档/重指派 + 多语言翻译/自定义字段查询/用户与权限组",
+  "version": "1.17.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

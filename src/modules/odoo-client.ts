@@ -3637,6 +3637,400 @@ export class OdooClient {
     };
   }
 
+  // ==================== 自动化 + 数据治理 + 批量 + 集成（v1.17） ====================
+  //
+  // v1.17 转向"深度+自动化+集成"，不再追业务广度：
+  //   - 流程自动化：base.automation / ir.cron 列表与创建
+  //   - 数据治理：联系人/产品重复检测、字段完整性扫描、合并向导
+  //   - 批量操作：邮件/归档/重新指派
+  //   - 集成 / 治理：多语言翻译写入、自定义字段查询、用户与权限组管理
+
+  // ---------- 自动化 3 ----------
+
+  async getAutomations(options: { model_id?: number; only_active?: boolean; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    if (options.model_id) domain.push(['model_id', '=', options.model_id]);
+    const result = await this.searchRead('base.automation', domain,
+      ['id', 'name', 'model_id', 'model_name', 'trigger', 'active',
+       'filter_domain', 'filter_pre_domain', 'trg_date_id'],
+      { limit: options.limit ?? 50, order: 'model_name, name' });
+    return result.records;
+  }
+
+  async getCronJobs(options: { only_active?: boolean; limit?: number } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    const result = await this.searchRead('ir.cron', domain,
+      ['id', 'cron_name', 'user_id', 'active',
+       'interval_number', 'interval_type', 'nextcall', 'ir_actions_server_id'],
+      { limit: options.limit ?? 100, order: 'nextcall asc' });
+    return result.records;
+  }
+
+  async createAutomation(values: {
+    name: string;
+    model_id: number;                  // ir.model id
+    trigger: 'on_create' | 'on_write' | 'on_create_or_write' | 'on_unlink' | 'on_change' | 'on_time' | 'on_time_created' | 'on_time_updated';
+    server_action_ids?: number[];      // ir.actions.server ids
+    filter_domain?: string;            // odoo domain string
+    active?: boolean;
+  }): Promise<number> {
+    const payload: Record<string, unknown> = {
+      name: values.name,
+      model_id: values.model_id,
+      trigger: values.trigger,
+      active: values.active ?? true,
+    };
+    if (values.server_action_ids && values.server_action_ids.length > 0) {
+      payload['action_server_ids'] = [[6, 0, values.server_action_ids]];
+    }
+    if (values.filter_domain) payload['filter_domain'] = values.filter_domain;
+    return this.create('base.automation', payload);
+  }
+
+  // ---------- 数据治理 4 ----------
+
+  async detectDuplicatePartners(options: {
+    by?: 'email' | 'phone' | 'name';   // 默认 email
+    limit?: number;
+  } = {}): Promise<{
+    detected_at: string;
+    by: string;
+    duplicate_groups: Array<{ key: string; partner_ids: number[]; count: number }>;
+  }> {
+    const by = options.by ?? 'email';
+    const fieldMap: Record<string, string> = {
+      email: 'email', phone: 'phone', name: 'name',
+    };
+    const groupField = fieldMap[by] ?? 'email';
+    // 用 read_group 找出现 > 1 次的值
+    const groups = await this.readGroup('res.partner',
+      [[groupField, '!=', false]],
+      [], [groupField], { limit: options.limit ?? 1000 });
+    const dups = groups.filter((g: Record<string, unknown>) => {
+      const cnt = Number(g[`${groupField}_count`] ?? g['__count'] ?? 0);
+      return cnt > 1;
+    });
+    // 对每个 dup group 拉具体 partner_ids
+    const groups_out: Array<{ key: string; partner_ids: number[]; count: number }> = [];
+    for (const g of dups.slice(0, 50)) {
+      const key = String((g as Record<string, unknown>)[groupField] ?? '');
+      if (!key) continue;
+      const cnt = Number((g as Record<string, unknown>)[`${groupField}_count`]
+                        ?? (g as Record<string, unknown>)['__count'] ?? 0);
+      const partners = await this.searchRead('res.partner',
+        [[groupField, '=', key]],
+        ['id'], { limit: 10 });
+      groups_out.push({
+        key,
+        partner_ids: partners.records.map(r => r['id'] as number),
+        count: cnt,
+      });
+    }
+    return {
+      detected_at: today(),
+      by,
+      duplicate_groups: groups_out,
+    };
+  }
+
+  async detectDuplicateProducts(options: {
+    by?: 'default_code' | 'barcode' | 'name';
+    limit?: number;
+  } = {}): Promise<{
+    detected_at: string;
+    by: string;
+    duplicate_groups: Array<{ key: string; product_ids: number[]; count: number }>;
+  }> {
+    const by = options.by ?? 'default_code';
+    const groupField = by;
+    const groups = await this.readGroup('product.product',
+      [[groupField, '!=', false]],
+      [], [groupField], { limit: options.limit ?? 1000 });
+    const dups = groups.filter((g: Record<string, unknown>) => {
+      const cnt = Number(g[`${groupField}_count`] ?? g['__count'] ?? 0);
+      return cnt > 1;
+    });
+    const groups_out: Array<{ key: string; product_ids: number[]; count: number }> = [];
+    for (const g of dups.slice(0, 50)) {
+      const key = String((g as Record<string, unknown>)[groupField] ?? '');
+      if (!key) continue;
+      const cnt = Number((g as Record<string, unknown>)[`${groupField}_count`]
+                        ?? (g as Record<string, unknown>)['__count'] ?? 0);
+      const products = await this.searchRead('product.product',
+        [[groupField, '=', key]],
+        ['id'], { limit: 10 });
+      groups_out.push({
+        key,
+        product_ids: products.records.map(r => r['id'] as number),
+        count: cnt,
+      });
+    }
+    return {
+      detected_at: today(),
+      by,
+      duplicate_groups: groups_out,
+    };
+  }
+
+  async dataQualityCompleteness(): Promise<{
+    detected_at: string;
+    issues: Array<{
+      model: string;
+      field: string;
+      missing_count: number;
+      severity: 'low' | 'medium' | 'high';
+      sample_ids: number[];
+    }>;
+  }> {
+    // 6 类高频"应填未填"扫描
+    const [
+      empNoEmail, empNoPhone, empNoMgr, partnerNoEmail, partnerCustNoCountry, prodNoCode,
+    ] = await Promise.all([
+      this.searchRead('hr.employee',
+        [['active', '=', true], ['work_email', '=', false]],
+        ['id'], { limit: 10 }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('hr.employee',
+        [['active', '=', true], ['work_phone', '=', false], ['mobile_phone', '=', false]],
+        ['id'], { limit: 10 }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('hr.employee',
+        [['active', '=', true], ['parent_id', '=', false]],
+        ['id'], { limit: 10 }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('res.partner',
+        [['active', '=', true], ['email', '=', false], ['is_company', '=', true]],
+        ['id'], { limit: 10 }),
+      this.searchRead('res.partner',
+        [['active', '=', true], ['country_id', '=', false], ['customer_rank', '>', 0]],
+        ['id'], { limit: 10 }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('product.product',
+        [['active', '=', true], ['default_code', '=', false]],
+        ['id'], { limit: 10 }).catch(() => ({ records: [], length: 0 })),
+    ]);
+
+    const issues: Array<{
+      model: string;
+      field: string;
+      missing_count: number;
+      severity: 'low' | 'medium' | 'high';
+      sample_ids: number[];
+    }> = [];
+
+    function addIssue(model: string, field: string, records: { records: OdooRecord[]; length?: number }, severity: 'low' | 'medium' | 'high') {
+      if (records.records.length === 0) return;
+      issues.push({
+        model, field,
+        missing_count: records.records.length,
+        severity,
+        sample_ids: records.records.slice(0, 5).map(r => r['id'] as number),
+      });
+    }
+    addIssue('hr.employee', 'work_email', empNoEmail, 'medium');
+    addIssue('hr.employee', 'work_phone+mobile_phone', empNoPhone, 'low');
+    addIssue('hr.employee', 'parent_id', empNoMgr, 'low');
+    addIssue('res.partner', 'email (公司)', partnerNoEmail, 'medium');
+    addIssue('res.partner', 'country_id (客户)', partnerCustNoCountry, 'low');
+    addIssue('product.product', 'default_code', prodNoCode, 'medium');
+
+    return { detected_at: today(), issues };
+  }
+
+  async mergePartners(values: {
+    partner_ids: number[];               // 2-3 个 partner id
+    dst_partner_id?: number;             // 主记录，不填默认 partner_ids[0]
+  }): Promise<{ kept_partner_id: number; merged_partner_ids: number[]; actions: string[] }> {
+    const actions: string[] = [];
+    if (values.partner_ids.length < 2) {
+      throw new Error('合并至少需要 2 个 partner');
+    }
+    if (values.partner_ids.length > 3) {
+      throw new Error('Odoo 安全限制：单次最多合并 3 个 partner');
+    }
+    const dstId = values.dst_partner_id ?? values.partner_ids[0]!;
+    // 创建合并向导记录然后调 _merge
+    // base.partner.merge.automatic.wizard._merge 是私有方法但可 RPC 调
+    // 创建向导
+    const wizardId = await this.create('base.partner.merge.automatic.wizard', {});
+    actions.push(`创建合并向导 #${wizardId}`);
+    // 调 _merge
+    await this.call('base.partner.merge.automatic.wizard', '_merge', [
+      [wizardId], values.partner_ids, dstId,
+    ]);
+    actions.push(`已合并到 partner #${dstId}（保留），归并 ${values.partner_ids.filter(i => i !== dstId).join(', ')}`);
+    return {
+      kept_partner_id: dstId,
+      merged_partner_ids: values.partner_ids.filter(i => i !== dstId),
+      actions,
+    };
+  }
+
+  // ---------- 批量操作 3 ----------
+
+  async batchEmail(values: {
+    model: string;
+    domain: Domain;
+    template_id: number;                 // mail.template id
+    limit?: number;
+  }): Promise<{ sent_count: number; record_ids: number[]; actions: string[] }> {
+    const actions: string[] = [];
+    const records = await this.searchRead(values.model, values.domain, ['id'],
+      { limit: values.limit ?? 100 });
+    const ids = records.records.map(r => r['id'] as number);
+    if (ids.length === 0) {
+      return { sent_count: 0, record_ids: [], actions: ['没有匹配的记录'] };
+    }
+    actions.push(`匹配 ${ids.length} 条记录`);
+    // 用 mail.template.send_mail 逐条发
+    let sent = 0;
+    for (const id of ids) {
+      try {
+        await this.call('mail.template', 'send_mail', [[values.template_id], id], {
+          force_send: false,            // 进队列，不阻塞
+        });
+        sent++;
+      } catch { /* 个别失败不阻塞 */ }
+    }
+    actions.push(`成功入队 ${sent} 封`);
+    return { sent_count: sent, record_ids: ids, actions };
+  }
+
+  async batchArchive(values: {
+    model: string;
+    record_ids: number[];
+    activate?: boolean;                  // false=archive, true=unarchive
+  }): Promise<{ count: number; model: string; activate: boolean }> {
+    const newActive = values.activate ?? false;
+    await this.write(values.model, values.record_ids, { active: newActive });
+    return { count: values.record_ids.length, model: values.model, activate: newActive };
+  }
+
+  async batchAssign(values: {
+    model: string;
+    record_ids: number[];
+    user_id: number;                     // 新经办人 res.users id
+    field?: string;                      // 默认 user_id；项目任务用 user_ids
+  }): Promise<{ count: number; model: string; field: string; user_id: number }> {
+    const field = values.field ?? 'user_id';
+    const writeVals: Record<string, unknown> = {};
+    if (field === 'user_ids') {
+      writeVals[field] = [[6, 0, [values.user_id]]];   // M2m replace
+    } else {
+      writeVals[field] = values.user_id;
+    }
+    await this.write(values.model, values.record_ids, writeVals);
+    return { count: values.record_ids.length, model: values.model, field, user_id: values.user_id };
+  }
+
+  // ---------- 集成 / 治理 4 ----------
+
+  async translateRecord(values: {
+    model: string;
+    record_id: number;
+    field: string;
+    translations: Record<string, string>;   // { 'zh_CN': '中文', 'en_US': 'English' }
+  }): Promise<{ model: string; record_id: number; field: string; updated_languages: string[] }> {
+    // Odoo 19 多语言写入：用 update_field_translations
+    // 等价：调 model.update_field_translations(field, {lang: value, ...})
+    await this.call(values.model, 'update_field_translations', [
+      [values.record_id], values.field, values.translations,
+    ]);
+    return {
+      model: values.model,
+      record_id: values.record_id,
+      field: values.field,
+      updated_languages: Object.keys(values.translations),
+    };
+  }
+
+  async getCustomFields(options: {
+    model?: string;                      // 不填看全部 x_* 字段
+    keyword?: string;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    // ir.model.fields where state='manual' 表示自定义字段
+    const domain: Domain = [['state', '=', 'manual']];
+    if (options.model) {
+      // 通过 ir.model.model = options.model 联表
+      domain.push(['model', '=', options.model]);
+    }
+    if (options.keyword) {
+      domain.push('|', ['name', 'ilike', options.keyword], ['field_description', 'ilike', options.keyword]);
+    }
+    const result = await this.searchRead('ir.model.fields', domain,
+      ['id', 'name', 'model', 'field_description', 'ttype', 'required',
+       'relation', 'help'],
+      { limit: options.limit ?? 100, order: 'model, name' });
+    return result.records;
+  }
+
+  async createUser(values: {
+    name: string;
+    login: string;                       // 通常是 email
+    email?: string;
+    employee_id?: number;                // 关联到 hr.employee
+    group_ids?: number[];                // 直接指定权限组 res.groups ids
+    password?: string;                   // 不填则需走"邀请邮件"流程
+    company_id?: number;
+  }): Promise<{ user_id: number; partner_id: number; actions: string[] }> {
+    const actions: string[] = [];
+    const payload: Record<string, unknown> = {
+      name: values.name,
+      login: values.login,
+      email: values.email ?? values.login,
+    };
+    if (values.password) payload['password'] = values.password;
+    if (values.company_id) payload['company_id'] = values.company_id;
+    if (values.group_ids && values.group_ids.length > 0) {
+      payload['groups_id'] = [[6, 0, values.group_ids]];
+    }
+    const userId = await this.create('res.users', payload);
+    actions.push(`创建系统用户 #${userId}`);
+
+    // 关联 employee
+    if (values.employee_id) {
+      try {
+        await this.write('hr.employee', [values.employee_id], { user_id: userId });
+        actions.push(`已关联到员工 #${values.employee_id}`);
+      } catch (e) {
+        actions.push(`员工关联失败：${String(e)}`);
+      }
+    }
+
+    const userRecord = (await this.read('res.users', [userId], ['partner_id']))[0];
+    const partnerArr = userRecord?.['partner_id'];
+    const partnerId = Array.isArray(partnerArr) ? partnerArr[0] as number : 0;
+
+    return { user_id: userId, partner_id: partnerId, actions };
+  }
+
+  async getUserGroups(userId?: number): Promise<{
+    user_id: number;
+    user_name: string;
+    groups: Array<{ id: number; name: string; category: unknown }>;
+  }> {
+    const uid = userId ?? this.uid ?? 0;
+    const me = (await this.read('res.users', [uid],
+      ['id', 'name', 'groups_id']))[0];
+    if (!me) {
+      return { user_id: uid, user_name: '', groups: [] };
+    }
+    const groupIds = Array.isArray(me['groups_id']) ? me['groups_id'] as number[] : [];
+    if (groupIds.length === 0) {
+      return { user_id: uid, user_name: String(me['name'] ?? ''), groups: [] };
+    }
+    const groups = await this.read('res.groups', groupIds,
+      ['id', 'name', 'category_id', 'full_name']);
+    return {
+      user_id: uid,
+      user_name: String(me['name'] ?? ''),
+      groups: groups.map(g => ({
+        id: g['id'] as number,
+        name: String(g['full_name'] ?? g['name'] ?? ''),
+        category: g['category_id'],
+      })),
+    };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{
