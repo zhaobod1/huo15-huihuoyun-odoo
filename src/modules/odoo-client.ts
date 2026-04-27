@@ -2494,6 +2494,603 @@ export class OdooClient {
     return { run_id: runId, payslip_count: payslipCount, actions };
   }
 
+  // ==================== 个人视图 + 跨域桥 + 库存 + 预测（v1.15） ====================
+  //
+  // v1.15 围绕三个主题：
+  // 1) 个人高频问题合并：odoo_my_overdues / odoo_my_today / odoo_my_unread
+  // 2) 跨模块桥接：helpdesk→task / lead→project / 发逾期催款
+  // 3) 库存深化：低库存预警 / 按仓库聚合 / picking 验收 / 仓库 dashboard
+  // 4) 多公司可见性 + 加权销售预测
+
+  // ---------- 个人视图 3 工具 ----------
+
+  async getMyOverdues(): Promise<{
+    today: string;
+    overdue_tasks: Record<string, unknown>[];
+    overdue_activities: Record<string, unknown>[];
+    overdue_tickets: Record<string, unknown>[];
+    overdue_invoices: Record<string, unknown>[];
+    total_count: number;
+  }> {
+    const uid = this.uid ?? 0;
+    const todayStr = today();
+    const [tasks, activities, tickets, invoices] = await Promise.all([
+      this.searchRead('project.task',
+        [['user_ids', 'in', [uid]], ['active', '=', true],
+         ['date_deadline', '<', todayStr], ['date_deadline', '!=', false]],
+        ['id', 'name', 'project_id', 'date_deadline', 'priority'],
+        { limit: 50, order: 'date_deadline asc' }),
+      this.searchRead('mail.activity',
+        [['user_id', '=', uid], ['date_deadline', '<', todayStr]],
+        ['id', 'summary', 'date_deadline', 'res_model', 'res_id', 'activity_type_id'],
+        { limit: 50, order: 'date_deadline asc' }),
+      this.searchRead('helpdesk.ticket',
+        [['user_id', '=', uid], ['close_date', '=', false],
+         ['sla_deadline', '<', `${todayStr} 23:59:59`], ['sla_deadline', '!=', false]],
+        ['id', 'name', 'partner_id', 'sla_deadline', 'priority'],
+        { limit: 50, order: 'sla_deadline asc' }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('account.move',
+        [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+         ['payment_state', 'in', ['not_paid', 'partial']],
+         ['invoice_date_due', '<', todayStr],
+         ['invoice_user_id', '=', uid]],
+        ['id', 'name', 'partner_id', 'invoice_date_due', 'amount_residual', 'currency_id'],
+        { limit: 50, order: 'invoice_date_due asc' }).catch(() => ({ records: [], length: 0 })),
+    ]);
+    const total = tasks.records.length + activities.records.length
+                + tickets.records.length + invoices.records.length;
+    return {
+      today: todayStr,
+      overdue_tasks: tasks.records.map(t => ({
+        id: t['id'], name: t['name'], project: t['project_id'],
+        deadline: t['date_deadline'], priority: t['priority'],
+      })),
+      overdue_activities: activities.records.map(a => ({
+        id: a['id'], summary: a['summary'], deadline: a['date_deadline'],
+        related: { model: a['res_model'], id: a['res_id'] },
+        type: a['activity_type_id'],
+      })),
+      overdue_tickets: tickets.records.map(t => ({
+        id: t['id'], name: t['name'], partner: t['partner_id'],
+        sla_deadline: t['sla_deadline'], priority: t['priority'],
+      })),
+      overdue_invoices: invoices.records.map(i => ({
+        id: i['id'], name: i['name'], partner: i['partner_id'],
+        due_date: i['invoice_date_due'], amount: i['amount_residual'],
+        currency: i['currency_id'],
+      })),
+      total_count: total,
+    };
+  }
+
+  async getMyToday(): Promise<{
+    today: string;
+    today_tasks: Record<string, unknown>[];
+    today_activities: Record<string, unknown>[];
+    today_calendar_events: Record<string, unknown>[];
+    today_due_invoices: Record<string, unknown>[];
+    total_count: number;
+  }> {
+    const uid = this.uid ?? 0;
+    const todayStr = today();
+    const [tasks, activities, events, invoices] = await Promise.all([
+      this.searchRead('project.task',
+        [['user_ids', 'in', [uid]], ['active', '=', true],
+         ['date_deadline', '=', todayStr]],
+        ['id', 'name', 'project_id', 'date_deadline', 'priority'],
+        { limit: 50, order: 'priority desc' }),
+      this.searchRead('mail.activity',
+        [['user_id', '=', uid], ['date_deadline', '=', todayStr]],
+        ['id', 'summary', 'date_deadline', 'res_model', 'res_id', 'activity_type_id'],
+        { limit: 50 }),
+      this.searchRead('calendar.event',
+        [['partner_ids.user_ids', 'in', [uid]],
+         ['start', '>=', `${todayStr} 00:00:00`],
+         ['start', '<=', `${todayStr} 23:59:59`]],
+        ['id', 'name', 'start', 'stop', 'duration', 'location'],
+        { limit: 50, order: 'start asc' }).catch(() => ({ records: [], length: 0 })),
+      this.searchRead('account.move',
+        [['move_type', '=', 'out_invoice'], ['state', '=', 'posted'],
+         ['payment_state', 'in', ['not_paid', 'partial']],
+         ['invoice_date_due', '=', todayStr],
+         ['invoice_user_id', '=', uid]],
+        ['id', 'name', 'partner_id', 'amount_residual', 'currency_id'],
+        { limit: 50 }).catch(() => ({ records: [], length: 0 })),
+    ]);
+    const total = tasks.records.length + activities.records.length
+                + events.records.length + invoices.records.length;
+    return {
+      today: todayStr,
+      today_tasks: tasks.records.map(t => ({
+        id: t['id'], name: t['name'], project: t['project_id'], priority: t['priority'],
+      })),
+      today_activities: activities.records.map(a => ({
+        id: a['id'], summary: a['summary'],
+        related: { model: a['res_model'], id: a['res_id'] },
+        type: a['activity_type_id'],
+      })),
+      today_calendar_events: events.records.map(e => ({
+        id: e['id'], name: e['name'], start: e['start'], stop: e['stop'],
+        duration: e['duration'], location: e['location'],
+      })),
+      today_due_invoices: invoices.records.map(i => ({
+        id: i['id'], name: i['name'], partner: i['partner_id'],
+        amount: i['amount_residual'], currency: i['currency_id'],
+      })),
+      total_count: total,
+    };
+  }
+
+  async getMyUnread(): Promise<{
+    unread_count: number;
+    unread_messages: Record<string, unknown>[];
+  }> {
+    const uid = this.uid ?? 0;
+    // 找当前 user 的 partner_id
+    const me = await this.read('res.users', [uid], ['partner_id']);
+    const partnerArr = me[0]?.['partner_id'];
+    if (!Array.isArray(partnerArr)) {
+      return { unread_count: 0, unread_messages: [] };
+    }
+    const partnerId = partnerArr[0] as number;
+
+    // mail.notification 按 res_partner_id + is_read=false 找未读
+    const notifs = await this.searchRead('mail.notification',
+      [['res_partner_id', '=', partnerId], ['is_read', '=', false],
+       ['notification_type', '=', 'inbox']],
+      ['id', 'mail_message_id', 'notification_type'],
+      { limit: 100, order: 'id desc' });
+    const messageIds = notifs.records
+      .map(n => Array.isArray(n['mail_message_id']) ? n['mail_message_id'][0] as number : null)
+      .filter((x): x is number => x !== null);
+    if (messageIds.length === 0) {
+      return { unread_count: 0, unread_messages: [] };
+    }
+    const messages = await this.read('mail.message', messageIds,
+      ['id', 'subject', 'body', 'author_id', 'date', 'model', 'res_id', 'message_type']);
+    return {
+      unread_count: messages.length,
+      unread_messages: messages.map(m => ({
+        id: m['id'], subject: m['subject'],
+        body_preview: typeof m['body'] === 'string'
+          ? (m['body'] as string).replace(/<[^>]+>/g, '').substring(0, 200)
+          : '',
+        author: m['author_id'], date: m['date'],
+        related: { model: m['model'], id: m['res_id'] },
+        type: m['message_type'],
+      })),
+    };
+  }
+
+  // ---------- CRM 智能助手 2 工具 ----------
+
+  async getCrmStaleLeads(options: {
+    user_id?: number;
+    days_no_activity?: number;       // 默认 14 天
+    limit?: number;
+  } = {}): Promise<{
+    threshold_days: number;
+    threshold_date: string;
+    stale_leads: Record<string, unknown>[];
+  }> {
+    const days = options.days_no_activity ?? 14;
+    const threshold = new Date(Date.now() - days * 86400000).toISOString().substring(0, 10);
+    const domain: Domain = [
+      ['type', '=', 'opportunity'],
+      ['active', '=', true],
+      // 没赢没输（非 won/lost stage 上）— probability < 100 且 active
+      ['probability', '<', 100],
+      // 最近 N 天没动：date_last_stage_update < threshold
+      ['date_last_stage_update', '<', `${threshold} 00:00:00`],
+    ];
+    if (options.user_id) domain.push(['user_id', '=', options.user_id]);
+    const result = await this.searchRead('crm.lead', domain,
+      ['id', 'name', 'partner_id', 'user_id', 'stage_id',
+       'expected_revenue', 'probability', 'date_last_stage_update',
+       'date_deadline', 'priority'],
+      { limit: options.limit ?? 30, order: 'date_last_stage_update asc' });
+    return {
+      threshold_days: days,
+      threshold_date: threshold,
+      stale_leads: result.records.map(l => ({
+        id: l['id'], name: l['name'], partner: l['partner_id'],
+        user: l['user_id'], stage: l['stage_id'],
+        revenue: l['expected_revenue'], probability: l['probability'],
+        last_stage_update: l['date_last_stage_update'],
+        deadline: l['date_deadline'], priority: l['priority'],
+      })),
+    };
+  }
+
+  async getCrmNextAction(leadId: number): Promise<{
+    lead: OdooRecord | null;
+    days_in_stage: number | null;
+    has_pending_activity: boolean;
+    recommendation: string;
+    suggested_actions: string[];
+  }> {
+    const leads = await this.read('crm.lead', [leadId],
+      ['id', 'name', 'stage_id', 'partner_id', 'user_id', 'date_deadline',
+       'date_last_stage_update', 'expected_revenue', 'probability',
+       'activity_ids', 'next_activity_id', 'activity_state']);
+    const lead = leads[0] ?? null;
+    if (!lead) {
+      return {
+        lead: null, days_in_stage: null, has_pending_activity: false,
+        recommendation: '商机不存在或不可访问',
+        suggested_actions: [],
+      };
+    }
+    const lastStageStr = lead['date_last_stage_update'] as string | undefined;
+    let daysInStage: number | null = null;
+    if (typeof lastStageStr === 'string' && lastStageStr.length >= 10) {
+      const lastStage = new Date(lastStageStr.replace(' ', 'T') + 'Z');
+      daysInStage = Math.floor((Date.now() - lastStage.getTime()) / 86400000);
+    }
+    const hasPending = Array.isArray(lead['activity_ids']) && (lead['activity_ids'] as unknown[]).length > 0;
+    const probability = Number(lead['probability'] ?? 0);
+
+    // 简单规则推荐
+    const suggestions: string[] = [];
+    let recommendation = '商机推进正常';
+    if (daysInStage !== null && daysInStage > 14 && !hasPending) {
+      recommendation = `已 ${daysInStage} 天没动且无待办活动，建议立即跟进`;
+      suggestions.push('调 odoo_create_activity 创建一个跟进电话/邮件活动');
+      suggestions.push('或调 odoo_crm_update 更新 stage_id 推进商机');
+      suggestions.push('或调 odoo_send_message 给商机发一条进度说明 chatter');
+    } else if (daysInStage !== null && daysInStage > 7 && probability >= 50) {
+      recommendation = `${daysInStage} 天没动但概率 ${probability}% 较高，建议主动联系决策人`;
+      suggestions.push('调 odoo_send_message 写一条客户进度说明');
+      suggestions.push('调 odoo_create_activity 安排一次客户拜访');
+    } else if (probability < 30 && daysInStage !== null && daysInStage > 30) {
+      recommendation = `概率 ${probability}% 低 + 30+ 天无变动，考虑 odoo_crm_lost 标记输单`;
+      suggestions.push('如确认无希望：调 odoo_crm_lost 关闭');
+      suggestions.push('如还有机会：先调 odoo_crm_update 改 probability 和 stage');
+    } else if (hasPending) {
+      recommendation = `已有待办活动，无需额外动作`;
+      suggestions.push('调 odoo_list_activities 查看具体待办');
+    } else {
+      suggestions.push('调 odoo_create_activity 安排下一步跟进');
+      suggestions.push('调 odoo_crm_update 更新 stage_id / probability');
+    }
+
+    return {
+      lead, days_in_stage: daysInStage, has_pending_activity: hasPending,
+      recommendation, suggested_actions: suggestions,
+    };
+  }
+
+  // ---------- 跨模块桥 3 工具 ----------
+
+  async helpdeskToTask(values: {
+    ticket_id: number;
+    project_id: number;
+    task_name?: string;              // 不填默认用 ticket.name
+    user_ids?: number[];             // 任务经办人，不填默认 ticket.user_id
+    keep_chatter_link?: boolean;     // 在 ticket chatter 里写"已转任务 #X"
+  }): Promise<{ task_id: number; ticket_id: number; actions: string[] }> {
+    const actions: string[] = [];
+    const ticket = (await this.read('helpdesk.ticket', [values.ticket_id],
+      ['id', 'name', 'description', 'partner_id', 'user_id']))[0];
+    if (!ticket) throw new Error(`未找到工单 #${values.ticket_id}`);
+
+    const taskValues: Record<string, unknown> = {
+      name: values.task_name ?? `[来自工单 #${values.ticket_id}] ${ticket['name']}`,
+      project_id: values.project_id,
+      description: ticket['description'] ?? '',
+    };
+    if (values.user_ids && values.user_ids.length > 0) {
+      taskValues['user_ids'] = [[6, 0, values.user_ids]];
+    } else {
+      const ticketUser = Array.isArray(ticket['user_id']) ? ticket['user_id'][0] as number : null;
+      if (ticketUser) taskValues['user_ids'] = [[6, 0, [ticketUser]]];
+    }
+    if (Array.isArray(ticket['partner_id']) && ticket['partner_id'][0]) {
+      taskValues['partner_id'] = ticket['partner_id'][0];
+    }
+    const taskId = await this.create('project.task', taskValues);
+    actions.push(`已创建任务 #${taskId}`);
+
+    if (values.keep_chatter_link !== false) {
+      try {
+        await this.call('helpdesk.ticket', 'message_post', [[values.ticket_id]], {
+          body: `已转为项目任务 <a href="#" data-oe-model="project.task" data-oe-id="${taskId}">#${taskId}</a>`,
+          message_type: 'comment',
+          subtype_xmlid: 'mail.mt_comment',
+        });
+        actions.push('已在工单 chatter 留下任务链接');
+      } catch (e) {
+        actions.push(`chatter 写入失败：${String(e)}`);
+      }
+    }
+    return { task_id: taskId, ticket_id: values.ticket_id, actions };
+  }
+
+  async leadToProject(values: {
+    lead_id: number;
+    project_name?: string;           // 默认用 lead.name
+    partner_id?: number;             // 默认用 lead.partner_id
+    user_id?: number;                // 项目经理
+    mark_won?: boolean;              // 顺手把商机标记 won（默认 false 让用户先确认）
+  }): Promise<{ project_id: number; lead_id: number; actions: string[] }> {
+    const actions: string[] = [];
+    const lead = (await this.read('crm.lead', [values.lead_id],
+      ['id', 'name', 'partner_id', 'user_id', 'description']))[0];
+    if (!lead) throw new Error(`未找到商机 #${values.lead_id}`);
+
+    const projValues: Record<string, unknown> = {
+      name: values.project_name ?? lead['name'] ?? `项目 from 商机 #${values.lead_id}`,
+      description: lead['description'] ?? '',
+    };
+    const partnerId = values.partner_id
+      ?? (Array.isArray(lead['partner_id']) ? lead['partner_id'][0] as number : null);
+    if (partnerId) projValues['partner_id'] = partnerId;
+    const managerId = values.user_id
+      ?? (Array.isArray(lead['user_id']) ? lead['user_id'][0] as number : null);
+    if (managerId) projValues['user_id'] = managerId;
+
+    const projId = await this.create('project.project', projValues);
+    actions.push(`已创建项目 #${projId}`);
+
+    if (values.mark_won) {
+      try {
+        await this.call('crm.lead', 'action_set_won_rainbowman', [[values.lead_id]]);
+        actions.push(`商机 #${values.lead_id} 标记为赢单`);
+      } catch (e) {
+        // fallback: 直接 write probability=100 + active=false
+        try {
+          await this.write('crm.lead', [values.lead_id], { probability: 100 });
+          actions.push(`商机 #${values.lead_id} probability 设为 100（赢单兜底）`);
+        } catch (e2) {
+          actions.push(`赢单标记失败：${String(e2)}`);
+        }
+      }
+    }
+
+    // 在商机 chatter 留链接
+    try {
+      await this.call('crm.lead', 'message_post', [[values.lead_id]], {
+        body: `已转化为项目 <a href="#" data-oe-model="project.project" data-oe-id="${projId}">#${projId}</a>`,
+        message_type: 'comment',
+        subtype_xmlid: 'mail.mt_comment',
+      });
+      actions.push('已在商机 chatter 留下项目链接');
+    } catch { /* noop */ }
+
+    return { project_id: projId, lead_id: values.lead_id, actions };
+  }
+
+  async sendInvoiceReminder(values: {
+    invoice_id: number;
+    custom_message?: string;
+  }): Promise<{ invoice_id: number; partner: unknown; actions: string[] }> {
+    const actions: string[] = [];
+    const invoice = (await this.read('account.move', [values.invoice_id],
+      ['id', 'name', 'partner_id', 'invoice_date_due', 'amount_residual', 'currency_id']))[0];
+    if (!invoice) throw new Error(`未找到发票 #${values.invoice_id}`);
+    const partner = invoice['partner_id'];
+
+    const todayStr = today();
+    const dueDate = invoice['invoice_date_due'] as string | undefined;
+    let daysOverdue = 0;
+    if (dueDate) {
+      daysOverdue = Math.max(0, Math.floor((Date.now() - new Date(dueDate + 'T00:00:00Z').getTime()) / 86400000));
+    }
+    const amount = invoice['amount_residual'];
+    const currencyArr = invoice['currency_id'];
+    const currencyName = Array.isArray(currencyArr) ? currencyArr[1] : '';
+
+    const body = values.custom_message ?? `您好，发票 ${invoice['name']} 已逾期 ${daysOverdue} 天，未付金额 ${amount} ${currencyName}，麻烦尽快安排付款。今天日期 ${todayStr}。`;
+
+    try {
+      await this.call('account.move', 'message_post', [[values.invoice_id]], {
+        body,
+        message_type: 'comment',
+        subtype_xmlid: 'mail.mt_comment',
+        partner_ids: Array.isArray(partner) ? [partner[0]] : [],
+      });
+      actions.push(`已通过 chatter 发送催款给 ${Array.isArray(partner) ? partner[1] : '客户'}`);
+    } catch (e) {
+      actions.push(`催款发送失败：${String(e)}`);
+    }
+    return { invoice_id: values.invoice_id, partner, actions };
+  }
+
+  // ---------- 库存深化 4 工具 ----------
+
+  async getStockLowAlerts(options: {
+    warehouse_id?: number;
+    limit?: number;
+  } = {}): Promise<{
+    alert_count: number;
+    alerts: Record<string, unknown>[];
+  }> {
+    // stock.warehouse.orderpoint 上有 qty_to_order > 0 的就是触发预警的
+    const domain: Domain = [['qty_to_order', '>', 0]];
+    if (options.warehouse_id) domain.push(['warehouse_id', '=', options.warehouse_id]);
+    const result = await this.searchRead('stock.warehouse.orderpoint', domain,
+      ['id', 'product_id', 'warehouse_id', 'location_id',
+       'product_min_qty', 'product_max_qty', 'qty_to_order', 'company_id'],
+      { limit: options.limit ?? 50, order: 'qty_to_order desc' });
+    return {
+      alert_count: result.records.length,
+      alerts: result.records.map(r => ({
+        id: r['id'], product: r['product_id'], warehouse: r['warehouse_id'],
+        location: r['location_id'], min_qty: r['product_min_qty'],
+        max_qty: r['product_max_qty'], to_order: r['qty_to_order'],
+        company: r['company_id'],
+      })),
+    };
+  }
+
+  async getStockByLocation(options: {
+    location_id?: number;
+    product_id?: number;
+    company_id?: number;
+  } = {}): Promise<{
+    by_location: Record<string, unknown>[];
+    total_quantity: number;
+  }> {
+    const domain: Domain = [];
+    if (options.location_id) domain.push(['location_id', '=', options.location_id]);
+    if (options.product_id) domain.push(['product_id', '=', options.product_id]);
+    if (options.company_id) domain.push(['company_id', '=', options.company_id]);
+    const groups = await this.readGroup('stock.quant', domain,
+      ['quantity:sum', 'reserved_quantity:sum'],
+      ['location_id'], { limit: 200, orderby: 'quantity desc' });
+    const total = groups.reduce((s: number, g: Record<string, unknown>) => s + Number(g['quantity'] ?? 0), 0);
+    return {
+      by_location: groups.map((g: Record<string, unknown>) => ({
+        location: g['location_id'],
+        on_hand: g['quantity'] ?? 0,
+        reserved: g['reserved_quantity'] ?? 0,
+        available: Number(g['quantity'] ?? 0) - Number(g['reserved_quantity'] ?? 0),
+        product_count: g['location_id_count'] ?? g['__count'] ?? 0,
+      })),
+      total_quantity: total,
+    };
+  }
+
+  async validatePicking(pickingId: number): Promise<unknown> {
+    // stock.picking.button_validate 是 single-record action
+    return this.call('stock.picking', 'button_validate', [[pickingId]]);
+  }
+
+  async getWarehouseDashboard(options: { warehouse_id?: number } = {}): Promise<{
+    warehouses: Record<string, unknown>[];
+    pending_in: number;               // 待入库 (incoming)
+    pending_out: number;              // 待出库 (outgoing)
+    pending_internal: number;         // 待内部调拨
+    backorders: number;               // 部分完成的回单
+  }> {
+    const whDomain: Domain = [['active', '=', true]];
+    if (options.warehouse_id) whDomain.push(['id', '=', options.warehouse_id]);
+    const warehouses = await this.searchRead('stock.warehouse', whDomain,
+      ['id', 'name', 'code', 'company_id'],
+      { limit: 50, order: 'name asc' });
+
+    const baseDomain: Domain = [['state', 'in', ['confirmed', 'assigned', 'waiting']]];
+    if (options.warehouse_id) {
+      baseDomain.push(['picking_type_id.warehouse_id', '=', options.warehouse_id]);
+    }
+    const [pIn, pOut, pInt, backorders] = await Promise.all([
+      this.searchCount('stock.picking',
+        [...baseDomain, ['picking_type_code', '=', 'incoming']]),
+      this.searchCount('stock.picking',
+        [...baseDomain, ['picking_type_code', '=', 'outgoing']]),
+      this.searchCount('stock.picking',
+        [...baseDomain, ['picking_type_code', '=', 'internal']]),
+      this.searchCount('stock.picking',
+        [...baseDomain, ['backorder_id', '!=', false]]),
+    ]);
+    return {
+      warehouses: warehouses.records.map(w => ({
+        id: w['id'], name: w['name'], code: w['code'], company: w['company_id'],
+      })),
+      pending_in: pIn,
+      pending_out: pOut,
+      pending_internal: pInt,
+      backorders,
+    };
+  }
+
+  // ---------- 多公司 1 工具 ----------
+
+  async getCompanies(): Promise<{
+    current_company_id: number | null;
+    allowed_company_ids: number[];
+    companies: Record<string, unknown>[];
+  }> {
+    // 拿当前 user 的 company_id 和 company_ids
+    const me = await this.read('res.users', [this.uid ?? 0],
+      ['id', 'name', 'company_id', 'company_ids']);
+    const companyArr = me[0]?.['company_id'];
+    const currentId = Array.isArray(companyArr) ? companyArr[0] as number : null;
+    const allowedIds = Array.isArray(me[0]?.['company_ids'])
+      ? (me[0]?.['company_ids'] as number[])
+      : (currentId ? [currentId] : []);
+    if (allowedIds.length === 0) {
+      return { current_company_id: currentId, allowed_company_ids: [], companies: [] };
+    }
+    const companies = await this.read('res.company', allowedIds,
+      ['id', 'name', 'partner_id', 'email', 'phone', 'currency_id', 'country_id', 'parent_id']);
+    return {
+      current_company_id: currentId,
+      allowed_company_ids: allowedIds,
+      companies: companies.map(c => ({
+        id: c['id'], name: c['name'], partner: c['partner_id'],
+        email: c['email'], phone: c['phone'],
+        currency: c['currency_id'], country: c['country_id'],
+        parent: c['parent_id'],
+      })),
+    };
+  }
+
+  // ---------- 加权销售预测 1 工具 ----------
+
+  async getSalesForecast(options: {
+    user_id?: number;
+    horizon_days?: number;            // 预测窗口（默认 90 天）
+  } = {}): Promise<{
+    horizon: { from: string; to: string; days: number };
+    weighted_pipeline: number;        // sum(expected_revenue × probability/100)
+    raw_pipeline: number;             // sum(expected_revenue)
+    by_stage: Record<string, unknown>[];
+    by_user: Record<string, unknown>[];
+    confirmed_so_amount: number;      // 已确认 sale.order 金额（同窗口）
+  }> {
+    const horizon = options.horizon_days ?? 90;
+    const dFrom = today();
+    const dToDate = new Date();
+    dToDate.setDate(dToDate.getDate() + horizon);
+    const dTo = dToDate.toISOString().substring(0, 10);
+
+    const domain: Domain = [
+      ['type', '=', 'opportunity'],
+      ['active', '=', true],
+      ['probability', '<', 100],
+      ['probability', '>', 0],
+    ];
+    if (options.user_id) domain.push(['user_id', '=', options.user_id]);
+
+    const [opportunities, byStage, byUser, soAgg] = await Promise.all([
+      this.searchRead('crm.lead', domain, ['expected_revenue', 'probability'], { limit: 1000 }),
+      this.readGroup('crm.lead', domain,
+        ['expected_revenue:sum', 'probability:avg'], ['stage_id'], { limit: 30 }),
+      this.readGroup('crm.lead', domain,
+        ['expected_revenue:sum'], ['user_id'], { limit: 30, orderby: 'expected_revenue desc' }),
+      this.readGroup('sale.order',
+        [['date_order', '>=', `${dFrom} 00:00:00`],
+         '|', ['state', '=', 'sale'], ['state', '=', 'done']],
+        ['amount_total:sum'], [], { limit: 1 }),
+    ]);
+
+    const weighted = opportunities.records.reduce((sum, o) =>
+      sum + Number(o['expected_revenue'] ?? 0) * Number(o['probability'] ?? 0) / 100, 0);
+    const raw = opportunities.records.reduce((sum, o) =>
+      sum + Number(o['expected_revenue'] ?? 0), 0);
+    const soTotal = Array.isArray(soAgg) && soAgg[0]
+      ? Number((soAgg[0] as Record<string, unknown>)['amount_total'] ?? 0) : 0;
+
+    return {
+      horizon: { from: dFrom, to: dTo, days: horizon },
+      weighted_pipeline: Math.round(weighted * 100) / 100,
+      raw_pipeline: raw,
+      by_stage: byStage.map((g: Record<string, unknown>) => ({
+        stage: g['stage_id'],
+        revenue: g['expected_revenue'] ?? 0,
+        avg_probability: g['probability'] ?? 0,
+        count: g['stage_id_count'] ?? g['__count'] ?? 0,
+      })),
+      by_user: byUser.map((g: Record<string, unknown>) => ({
+        user: g['user_id'],
+        revenue: g['expected_revenue'] ?? 0,
+        count: g['user_id_count'] ?? g['__count'] ?? 0,
+      })),
+      confirmed_so_amount: soTotal,
+    };
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

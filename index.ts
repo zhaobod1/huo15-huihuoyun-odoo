@@ -2471,6 +2471,283 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // 个人视图 + 跨域桥 + 库存深化 + 多公司 + 销售预测（v1.15 新增 14 个）
+  //   个人视图 3 + CRM 智能 2 + 跨域桥 3 + 库存深化 4 + 多公司 1 + 预测 1
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 个人视图（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_my_overdues',
+    description: '我的所有逾期项一览（任务 + 活动 + 工单 + 客户发票，4 域 Promise.all 并发）。一句话回答"我手上有什么逾期了"。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getMyOverdues();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_my_today',
+    description: '我今天所有要做的事（今日截止任务 + 今日活动 + 今日日历 + 今日到期发票）。一句话回答"我今天要做什么"。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getMyToday();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_my_unread',
+    description: '我所有未读消息（mail.notification + is_read=false + inbox 类型 + 我的 partner）。返回原始消息 + body 预览（去 HTML 截断 200 字）。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getMyUnread();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- CRM 智能助手（2 个） ----------
+
+  api.registerTool({
+    name: 'odoo_crm_stale_leads',
+    description: '查"长时间没动"的商机（probability < 100 且 date_last_stage_update < 今天-N 天）。默认阈值 14 天。可按销售员筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        user_id:          { type: 'number', description: '只看某销售员' },
+        days_no_activity: { type: 'number', description: '没动天数阈值，默认 14' },
+        limit:            { type: 'number', description: '上限，默认 30' },
+      },
+    },
+    async handler(p: { user_id?: number; days_no_activity?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getCrmStaleLeads(p);
+        return { success: true, count: data.stale_leads.length, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_crm_next_action',
+    description: '【智能助手】对单个商机给出"下一步该做什么"的建议。基于 stage 停留天数 + 是否有待办活动 + probability 三个维度做规则推荐，返回 recommendation + suggested_actions（具体调哪个工具）。',
+    schema: {
+      type: 'object',
+      properties: { lead_id: { type: 'number', description: '商机 id（必填）' } },
+      required: ['lead_id'],
+    },
+    async handler(p: { lead_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getCrmNextAction(p.lead_id);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 跨模块桥（3 个） ----------
+
+  api.registerTool({
+    name: 'odoo_helpdesk_to_task',
+    description: '把工单转化为项目任务（helpdesk.ticket → project.task）。会复制 name/description/partner_id/user_id；可选在工单 chatter 留下任务链接（默认 keep_chatter_link=true）。',
+    schema: {
+      type: 'object',
+      properties: {
+        ticket_id:          { type: 'number', description: '工单 id（必填）' },
+        project_id:         { type: 'number', description: '目标项目 id（必填）' },
+        task_name:          { type: 'string', description: '任务名，不填默认用 [来自工单 #X] + ticket name' },
+        user_ids:           { type: 'array', items: { type: 'number' }, description: '任务经办人，不填用工单的 user_id' },
+        keep_chatter_link:  { type: 'boolean', description: '是否在工单 chatter 留任务链接，默认 true' },
+      },
+      required: ['ticket_id', 'project_id'],
+    },
+    async handler(p: { ticket_id: number; project_id: number; task_name?: string; user_ids?: number[]; keep_chatter_link?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.helpdeskToTask(p);
+        return { success: true, ...result, message: `工单 #${p.ticket_id} 已转任务 #${result.task_id}：${result.actions.join('；')}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_lead_to_project',
+    description: '商机赢单后建项目（crm.lead → project.project）。复制 name/description/partner_id/user_id 到项目；可选 mark_won=true 顺手标记商机赢单（先调 action_set_won_rainbowman，失败兜底 write probability=100）。会在商机 chatter 留项目链接。',
+    schema: {
+      type: 'object',
+      properties: {
+        lead_id:      { type: 'number', description: '商机 id（必填）' },
+        project_name: { type: 'string', description: '项目名，不填用商机 name' },
+        partner_id:   { type: 'number', description: '客户 id，不填用商机 partner' },
+        user_id:      { type: 'number', description: '项目经理，不填用商机 user_id' },
+        mark_won:     { type: 'boolean', description: '是否同时标记商机赢单，默认 false' },
+      },
+      required: ['lead_id'],
+    },
+    async handler(p: { lead_id: number; project_name?: string; partner_id?: number; user_id?: number; mark_won?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.leadToProject(p);
+        return { success: true, ...result, message: `商机 #${p.lead_id} 已转项目 #${result.project_id}：${result.actions.join('；')}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_invoice_send_reminder',
+    description: '发送催款提醒（在 account.move chatter 写一条 partner 可见的消息）。默认正文自动包含发票号 + 逾期天数 + 未付金额；可用 custom_message 覆写。',
+    schema: {
+      type: 'object',
+      properties: {
+        invoice_id:     { type: 'number', description: '发票 id（必填）' },
+        custom_message: { type: 'string', description: '自定义催款语，不填用默认模板' },
+      },
+      required: ['invoice_id'],
+    },
+    async handler(p: { invoice_id: number; custom_message?: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.sendInvoiceReminder(p);
+        return { success: true, ...result, message: result.actions.join('；') };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 库存深化（4 个） ----------
+
+  api.registerTool({
+    name: 'odoo_stock_low_alerts',
+    description: '查触发再订货预警的产品（stock.warehouse.orderpoint where qty_to_order > 0）。返回每条 orderpoint：产品 / 仓库 / min/max 库存 / 建议订货量。',
+    schema: {
+      type: 'object',
+      properties: {
+        warehouse_id: { type: 'number', description: '仓库 id 筛选' },
+        limit:        { type: 'number', description: '上限，默认 50' },
+      },
+    },
+    async handler(p: { warehouse_id?: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getStockLowAlerts(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_stock_by_location',
+    description: '按库位聚合库存（stock.quant + read_group on location_id）。每个库位返回总在手量、保留量、可用量、SKU 数。可按产品 / 库位 / 公司筛。',
+    schema: {
+      type: 'object',
+      properties: {
+        location_id: { type: 'number', description: '只看某库位' },
+        product_id:  { type: 'number', description: '只看某产品' },
+        company_id:  { type: 'number', description: '公司 id' },
+      },
+    },
+    async handler(p: { location_id?: number; product_id?: number; company_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getStockByLocation(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_stock_picking_validate',
+    description: '【仓库管理员】验证调拨单 / 出入库单（stock.picking.button_validate）。会按 immediate transfer 流程把状态推到 done。需要权限 stock.group_stock_user。',
+    schema: {
+      type: 'object',
+      properties: { picking_id: { type: 'number', description: 'stock.picking id（必填）' } },
+      required: ['picking_id'],
+    },
+    async handler(p: { picking_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.validatePicking(p.picking_id);
+        return { success: true, message: `调拨单 #${p.picking_id} 已验证（按 immediate transfer 流程完成）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_warehouse_dashboard',
+    description: '仓库仪表盘：仓库列表 + 待入库/待出库/待内部调拨/回单数。可按 warehouse_id 筛单一仓库。',
+    schema: {
+      type: 'object',
+      properties: { warehouse_id: { type: 'number', description: '仓库 id 筛选' } },
+    },
+    async handler(p: { warehouse_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getWarehouseDashboard(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 多公司（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_companies',
+    description: '列我可访问的公司（res.company），含当前激活公司 + allowed_company_ids。用于"公司列表"、"我属于几家公司"、"切公司前先看有哪些"。',
+    schema: { type: 'object', properties: {} },
+    async handler(_p: unknown, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getCompanies();
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 加权销售预测（1 个） ----------
+
+  api.registerTool({
+    name: 'odoo_sales_forecast',
+    description: '加权销售预测（crm.lead × probability + sale.order 已确认）。返回 weighted_pipeline = Σ(expected_revenue × probability/100)、原始 raw_pipeline、按 stage / 销售员分布、同窗口 confirmed sale.order 总额。horizon_days 默认 90。',
+    schema: {
+      type: 'object',
+      properties: {
+        user_id:      { type: 'number', description: '只看某销售员' },
+        horizon_days: { type: 'number', description: '预测窗口天数，默认 90' },
+      },
+    },
+    async handler(p: { user_id?: number; horizon_days?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getSalesForecast(p);
+        return { success: true, ...data };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -3871,7 +4148,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 133 个工具已注册（v1.14 — Analytics & Orchestration：HR 进阶分析/入离职编排/工时审批/销售/CRM/账龄/工单/项目仪表盘 + 我的工作负荷 + 工资批次）');
+  api.logger.info('[odoo] 147 个工具已注册（v1.15 — 个人视图/CRM 智能/跨域桥/库存深化/多公司/销售预测）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -3975,6 +4252,11 @@ function registerHooks(api: OpenClawPluginApi) {
 **HR 编排（v1.14）**：odoo_employee_onboarding · odoo_employee_offboarding · odoo_payslip_run_create
 **工时审批（v1.14）**：odoo_timesheet_validate · odoo_timesheet_invalidate
 **跨域仪表盘（v1.14）**：odoo_sales_dashboard · odoo_crm_pipeline_health · odoo_invoice_aging · odoo_helpdesk_dashboard · odoo_project_dashboard · odoo_my_workload
+**个人视图（v1.15）**：odoo_my_overdues · odoo_my_today · odoo_my_unread
+**CRM 智能助手（v1.15）**：odoo_crm_stale_leads · odoo_crm_next_action · odoo_sales_forecast
+**跨模块桥（v1.15）**：odoo_helpdesk_to_task · odoo_lead_to_project · odoo_invoice_send_reminder
+**库存深化（v1.15）**：odoo_stock_low_alerts · odoo_stock_by_location · odoo_stock_picking_validate · odoo_warehouse_dashboard
+**多公司（v1.15）**：odoo_companies
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -4109,6 +4391,20 @@ function registerHooks(api: OpenClawPluginApi) {
 | 项目仪表盘 / 项目总览 / 任务总数 | **odoo_project_dashboard** |
 | 我手上还有多少活 / 我的工作负荷 / 我的待办全图 | **odoo_my_workload** |
 | 创建本月工资批次 / 批量生成工资单 | **odoo_payslip_run_create** |
+| 我有什么逾期的 / 我手上逾期项 / 哪些事过期了 | **odoo_my_overdues** |
+| 我今天要做什么 / 今天的全部事 | **odoo_my_today** |
+| 我有几条未读 / 未读消息 / @我的有没有看 | **odoo_my_unread** |
+| 哪些商机停滞了 / 长时间没动的商机 / stale leads | **odoo_crm_stale_leads** |
+| 这个商机下一步该做什么 / 给我建议 / 智能推荐 | **odoo_crm_next_action** |
+| 销售预测 / 加权管道 / 我们这个季度大概能做多少 | **odoo_sales_forecast** |
+| 把这个工单转任务 / 工单转项目 | **odoo_helpdesk_to_task** |
+| 商机赢单建项目 / 商机转项目 | **odoo_lead_to_project** |
+| 给客户发催款 / 发逾期提醒 | **odoo_invoice_send_reminder** |
+| 库存预警 / 哪些产品要补货 / 缺货预警 | **odoo_stock_low_alerts** |
+| 各个仓库库存 / 按库位看库存 | **odoo_stock_by_location** |
+| 验收这条调拨单 / 出库确认 | **odoo_stock_picking_validate** |
+| 仓库总览 / 待出库待入库 / 仓储情况 | **odoo_warehouse_dashboard** |
+| 我属于几家公司 / 公司列表 / 看公司 | **odoo_companies** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
