@@ -4518,6 +4518,386 @@ export class OdooClient {
     };
   }
 
+  // ==================== 审批发起 + 克隆 + 关注 + 资源 + 报表订阅（v1.20） ====================
+  //
+  // v1.20 六个主题：
+  //   - 审批工作流深化：列分类 + 发起 + 提交 + 我待审
+  //   - 数据克隆：浅复制 / 深复制 / CSV 导入
+  //   - Mail 关注：列关注者 / 订阅 / 取消订阅
+  //   - 资源 / 工作时间表：resource.resource + resource.calendar
+  //   - 报表订阅：cron 定期发 PDF
+  //   - 多语言：读现有翻译
+
+  // ---------- 审批工作流深化 4 ----------
+
+  async getApprovalCategories(options: {
+    keyword?: string;
+    only_active?: boolean;
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.only_active !== false) domain.push(['active', '=', true]);
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    const result = await this.searchRead('approval.category', domain,
+      ['id', 'name', 'approval_minimum', 'approval_type',
+       'company_id', 'automated_sequence'],
+      { limit: options.limit ?? 50, order: 'name asc' });
+    return result.records;
+  }
+
+  async createApprovalRequest(values: {
+    category_id: number;
+    name?: string;                     // 不填用 category 默认
+    reason?: string;
+    date_start?: string;               // YYYY-MM-DD HH:MM:SS
+    date_end?: string;
+    quantity?: number;
+    amount?: number;
+    location?: string;
+    partner_id?: number;
+    auto_confirm?: boolean;            // 创建后立即 action_confirm 提交
+  }): Promise<{ request_id: number; confirmed: boolean; actions: string[] }> {
+    const actions: string[] = [];
+    const payload: Record<string, unknown> = {
+      category_id: values.category_id,
+    };
+    for (const k of ['name','reason','date_start','date_end','quantity','amount','location','partner_id'] as const) {
+      const v = values[k];
+      if (v !== undefined) payload[k] = v;
+    }
+    const reqId = await this.create('approval.request', payload);
+    actions.push(`创建审批请求 #${reqId}`);
+
+    let confirmed = false;
+    if (values.auto_confirm) {
+      try {
+        await this.call('approval.request', 'action_confirm', [[reqId]]);
+        confirmed = true;
+        actions.push('已提交（new → pending）');
+      } catch (e) {
+        actions.push(`自动提交失败：${String(e)}`);
+      }
+    }
+    return { request_id: reqId, confirmed, actions };
+  }
+
+  async confirmApprovalRequest(ids: number[]): Promise<unknown> {
+    return this.call('approval.request', 'action_confirm', [ids]);
+  }
+
+  async getMyPendingApprovals(options: { limit?: number } = {}): Promise<OdooRecord[]> {
+    const uid = this.uid ?? 0;
+    // 我作为 approver 且 request 是 pending
+    const result = await this.searchRead('approval.request',
+      [['request_status', '=', 'pending'],
+       ['approver_ids.user_id', '=', uid]],
+      ['id', 'name', 'category_id', 'request_owner_id', 'request_status',
+       'date', 'amount', 'reason'],
+      { limit: options.limit ?? 30, order: 'date asc' });
+    return result.records;
+  }
+
+  // ---------- 数据克隆 / 导入 3 ----------
+
+  async cloneRecord(values: {
+    model: string;
+    record_id: number;
+    overrides?: Record<string, unknown>;   // copy(default=...) 的 default 参数
+  }): Promise<{ original_id: number; clone_id: number; model: string }> {
+    // BaseModel.copy(default) 是 Odoo 内置，所有 model 都有
+    const result = await this.call(values.model, 'copy',
+      [[values.record_id]],
+      values.overrides ? { default: values.overrides } : {});
+    // copy 返回 ids 数组（v18+）或单个 id（更老版本兼容）
+    const cloneId = Array.isArray(result) ? Number(result[0]) : Number(result);
+    return {
+      original_id: values.record_id,
+      clone_id: cloneId,
+      model: values.model,
+    };
+  }
+
+  async cloneRecordWithLines(values: {
+    model: string;
+    record_id: number;
+    line_field: string;                    // 如 sale.order 用 order_line, mrp.bom 用 bom_line_ids
+    line_model: string;                    // 子表 model，如 sale.order.line
+    line_fields: string[];                 // 要复制的子表字段
+    overrides?: Record<string, unknown>;
+  }): Promise<{
+    original_id: number;
+    clone_id: number;
+    model: string;
+    lines_copied: number;
+  }> {
+    // 第 1 步：先拿源记录的 line ids
+    const original = (await this.read(values.model, [values.record_id], [values.line_field]))[0];
+    const lineIds = Array.isArray(original?.[values.line_field])
+      ? original[values.line_field] as number[] : [];
+
+    // 第 2 步：copy 主记录（不含子，因为我们要重写）
+    const overrides = { ...(values.overrides ?? {}), [values.line_field]: [[5]] };  // [5] = clear all
+    const cloneResult = await this.call(values.model, 'copy',
+      [[values.record_id]], { default: overrides });
+    const cloneId = Array.isArray(cloneResult) ? Number(cloneResult[0]) : Number(cloneResult);
+
+    // 第 3 步：读所有原子表 + 重写到新主记录
+    if (lineIds.length === 0) {
+      return { original_id: values.record_id, clone_id: cloneId, model: values.model, lines_copied: 0 };
+    }
+    const lines = await this.read(values.line_model, lineIds, values.line_fields);
+    // 找到子表里指向主表的 M2o 字段（约定 = model 的最后一段，去 _line / _ids 后缀）
+    // 简单做法：让调用方传 parent_field，但兜底从 line 的字段反推
+    // 这里采用约定：忽略 m2o 反向，让 [0,0,vals] 自动挂到新主记录
+    // 但 [0,0,vals] 必须写到 model 的 line_field 字段上
+    // 所以：write 主记录，line_field = [[0, 0, lineVals], ...]
+    const lineCommands = lines.map(l => {
+      // 去掉 id 字段，拿剩下的纯值
+      const vals: Record<string, unknown> = {};
+      for (const f of values.line_fields) {
+        if (f === 'id') continue;
+        let v = l[f];
+        // M2o 类字段返回 [id, name]，写入要拍扁成 id
+        if (Array.isArray(v) && v.length === 2 && typeof v[0] === 'number') {
+          v = v[0];
+        }
+        vals[f] = v;
+      }
+      return [0, 0, vals];
+    });
+    await this.write(values.model, [cloneId], { [values.line_field]: lineCommands });
+
+    return {
+      original_id: values.record_id,
+      clone_id: cloneId,
+      model: values.model,
+      lines_copied: lines.length,
+    };
+  }
+
+  async importCsv(values: {
+    model: string;
+    headers: string[];                     // 字段技术名
+    rows: string[][];                      // 每行字符串
+  }): Promise<{
+    model: string;
+    imported_ids: number[];
+    failed_rows: Array<{ row_index: number; error: string }>;
+  }> {
+    const imported_ids: number[] = [];
+    const failed_rows: Array<{ row_index: number; error: string }> = [];
+    // 一行一行 create（不使用 Odoo 内置 load() 因为它要求 base64 编码 + CSV 模板）
+    for (let i = 0; i < values.rows.length; i++) {
+      const row = values.rows[i]!;
+      const vals: Record<string, unknown> = {};
+      values.headers.forEach((h, idx) => {
+        const v = row[idx];
+        if (v === undefined || v === '') return;
+        // 尝试自动数字转换（M2o id / Integer / Float）
+        if (/^\d+$/.test(v)) vals[h] = Number(v);
+        else if (/^\d+\.\d+$/.test(v)) vals[h] = Number(v);
+        else if (v.toLowerCase() === 'true') vals[h] = true;
+        else if (v.toLowerCase() === 'false') vals[h] = false;
+        else vals[h] = v;
+      });
+      try {
+        const id = await this.create(values.model, vals);
+        imported_ids.push(id);
+      } catch (e) {
+        failed_rows.push({ row_index: i, error: String(e) });
+      }
+    }
+    return { model: values.model, imported_ids, failed_rows };
+  }
+
+  // ---------- Mail 关注（3） ----------
+
+  async getFollowers(options: {
+    model: string;
+    record_id: number;
+    limit?: number;
+  }): Promise<OdooRecord[]> {
+    const result = await this.searchRead('mail.followers',
+      [['res_model', '=', options.model], ['res_id', '=', options.record_id]],
+      ['id', 'partner_id', 'res_model', 'res_id', 'subtype_ids'],
+      { limit: options.limit ?? 100 });
+    return result.records;
+  }
+
+  async subscribeRecord(values: {
+    model: string;
+    record_id: number;
+    partner_ids?: number[];                // 不填默认订阅当前用户的 partner
+  }): Promise<{ model: string; record_id: number; partner_ids: number[] }> {
+    let partnerIds = values.partner_ids;
+    if (!partnerIds || partnerIds.length === 0) {
+      const me = (await this.read('res.users', [this.uid ?? 0], ['partner_id']))[0];
+      const partnerArr = me?.['partner_id'];
+      const myPartner = Array.isArray(partnerArr) ? partnerArr[0] as number : null;
+      partnerIds = myPartner ? [myPartner] : [];
+    }
+    if (partnerIds.length === 0) {
+      throw new Error('未指定 partner_ids，且当前用户没有 partner_id');
+    }
+    await this.call(values.model, 'message_subscribe',
+      [[values.record_id]], { partner_ids: partnerIds });
+    return { model: values.model, record_id: values.record_id, partner_ids: partnerIds };
+  }
+
+  async unsubscribeRecord(values: {
+    model: string;
+    record_id: number;
+    partner_ids?: number[];                // 不填默认 = 取消我自己的订阅
+  }): Promise<{ model: string; record_id: number; partner_ids: number[] }> {
+    let partnerIds = values.partner_ids;
+    if (!partnerIds || partnerIds.length === 0) {
+      const me = (await this.read('res.users', [this.uid ?? 0], ['partner_id']))[0];
+      const partnerArr = me?.['partner_id'];
+      const myPartner = Array.isArray(partnerArr) ? partnerArr[0] as number : null;
+      partnerIds = myPartner ? [myPartner] : [];
+    }
+    await this.call(values.model, 'message_unsubscribe',
+      [[values.record_id]], { partner_ids: partnerIds });
+    return { model: values.model, record_id: values.record_id, partner_ids: partnerIds };
+  }
+
+  // ---------- 资源 / 工作时间表 2 ----------
+
+  async getResources(options: {
+    keyword?: string;
+    resource_type?: 'user' | 'material';
+    limit?: number;
+  } = {}): Promise<OdooRecord[]> {
+    const domain: Domain = [];
+    if (options.keyword) domain.push(['name', 'ilike', options.keyword]);
+    if (options.resource_type) domain.push(['resource_type', '=', options.resource_type]);
+    const result = await this.searchRead('resource.resource', domain,
+      ['id', 'name', 'resource_type', 'user_id', 'company_id',
+       'calendar_id', 'tz', 'time_efficiency'],
+      { limit: options.limit ?? 50, order: 'name asc' });
+    return result.records;
+  }
+
+  async getResourceCalendar(calendarId: number): Promise<{
+    calendar: OdooRecord | null;
+    attendances: OdooRecord[];
+  }> {
+    const calendars = await this.read('resource.calendar', [calendarId],
+      ['id', 'name', 'tz', 'two_weeks_calendar', 'attendance_ids', 'company_id']);
+    const calendar = calendars[0] ?? null;
+    if (!calendar) return { calendar: null, attendances: [] };
+    const attendanceIds = Array.isArray(calendar['attendance_ids'])
+      ? calendar['attendance_ids'] as number[] : [];
+    const attendances = attendanceIds.length > 0
+      ? await this.read('resource.calendar.attendance', attendanceIds,
+          ['id', 'name', 'dayofweek', 'hour_from', 'hour_to', 'day_period',
+           'date_from', 'date_to'])
+      : [];
+    return { calendar, attendances };
+  }
+
+  // ---------- 报表订阅 1 ----------
+
+  async scheduleReportEmail(values: {
+    name: string;                          // cron 名
+    report_ref: string;                    // ir.actions.report xml id
+    record_domain?: string;                // 用 Python eval 的 domain，如 [('state','=','sale')]
+    model: string;                         // 报表对应的 model
+    interval_number: number;               // 间隔数
+    interval_type: 'minutes' | 'hours' | 'days' | 'weeks' | 'months';
+    next_call?: string;                    // YYYY-MM-DD HH:MM:SS
+    user_id?: number;                      // scheduler 身份
+  }): Promise<{ cron_id: number; server_action_id: number; actions: string[] }> {
+    const actions: string[] = [];
+    // 第 1 步：创建 ir.actions.server 用于真正执行
+    // state='code'：写一段 Python 调 _render_qweb_pdf + 发邮件
+    const code = `
+# 自动生成：定期渲染并发送 ${values.report_ref} 报表
+domain = ${values.record_domain ?? '[]'}
+records = env['${values.model}'].search(domain)
+if records:
+    report = env.ref('${values.report_ref}')
+    pdf_content, _ = report._render_qweb_pdf(report, records.ids)
+    # 简化：写入主 user 收件箱（更复杂的可改为发邮件）
+    env['mail.message'].create({
+        'subject': '定期报表：${values.name}',
+        'body': '${values.name} 报表已就绪（共 %d 条记录）' % len(records),
+        'message_type': 'notification',
+        'model': 'res.users',
+        'res_id': env.uid,
+    })
+`.trim();
+
+    // 找一个 model_id（必须给 server action）
+    const modelRec = await this.searchRead('ir.model',
+      [['model', '=', values.model]], ['id'], { limit: 1 });
+    if (modelRec.records.length === 0) throw new Error(`model ${values.model} 不存在`);
+    const modelId = modelRec.records[0]?.['id'] as number;
+
+    const serverActionId = await this.create('ir.actions.server', {
+      name: `定期报表：${values.name}`,
+      model_id: modelId,
+      state: 'code',
+      code,
+    });
+    actions.push(`创建 server action #${serverActionId}（state=code）`);
+
+    // 第 2 步：创建 ir.cron 调用这个 server action
+    const cronPayload: Record<string, unknown> = {
+      cron_name: `report-${values.name}`,
+      ir_actions_server_id: serverActionId,
+      interval_number: values.interval_number,
+      interval_type: values.interval_type,
+      active: true,
+    };
+    if (values.next_call) cronPayload['nextcall'] = values.next_call;
+    if (values.user_id) cronPayload['user_id'] = values.user_id;
+    const cronId = await this.create('ir.cron', cronPayload);
+    actions.push(`创建 cron #${cronId}（每 ${values.interval_number} ${values.interval_type}）`);
+
+    return { cron_id: cronId, server_action_id: serverActionId, actions };
+  }
+
+  // ---------- 多语言 1 ----------
+
+  async getRecordTranslations(values: {
+    model: string;
+    record_id: number;
+    field: string;
+  }): Promise<{
+    model: string;
+    record_id: number;
+    field: string;
+    translations: Record<string, string>;  // { 'zh_CN': '...', 'en_US': '...' }
+  }> {
+    // Odoo 19 用 model.get_field_translations(field) 返 [{lang, value, source}, ...]
+    try {
+      const result = await this.call(values.model, 'get_field_translations',
+        [[values.record_id], values.field]) as unknown[];
+      // result[0] 是 list of {lang, value, source}, result[1] 是 dict 元数据
+      const list = Array.isArray(result) && Array.isArray(result[0])
+        ? result[0] as Array<Record<string, unknown>> : [];
+      const translations: Record<string, string> = {};
+      for (const r of list) {
+        const lang = r['lang'];
+        const value = r['value'];
+        if (typeof lang === 'string') translations[lang] = String(value ?? '');
+      }
+      return { model: values.model, record_id: values.record_id, field: values.field, translations };
+    } catch {
+      // 老版本退化：直接读 ir.translation
+      const trans = await this.searchRead('ir.translation',
+        [['name', '=', `${values.model},${values.field}`],
+         ['res_id', '=', values.record_id]],
+        ['lang', 'value'], { limit: 50 });
+      const translations: Record<string, string> = {};
+      for (const t of trans.records) {
+        translations[String(t['lang'])] = String(t['value'] ?? '');
+      }
+      return { model: values.model, record_id: values.record_id, field: values.field, translations };
+    }
+  }
+
   // ==================== 实施经理每日概况 ====================
 
   async getDailyBriefing(): Promise<{

@@ -102,6 +102,11 @@ const ODOO_HELP_TEXT = `### 工具速查（共 189 个）
 **多公司联动（v1.18）**：odoo_company_switch · odoo_consolidated_dashboard
 **通用报表（v1.18）**：odoo_pivot_data · odoo_email_log
 **外部集成（v1.18）**：odoo_webhook_create · odoo_record_share_url · odoo_mail_queue
+**审批工作流深化（v1.20）**：odoo_approval_categories · odoo_approval_create · odoo_approval_confirm · odoo_approval_my_pending
+**数据克隆 / 导入（v1.20）**：odoo_record_clone · odoo_record_clone_with_lines · odoo_csv_import
+**Mail 关注（v1.20）**：odoo_followers · odoo_subscribe · odoo_unsubscribe
+**资源 / 工作时间（v1.20）**：odoo_resources · odoo_resource_calendar
+**报表订阅 / 多语言（v1.20）**：odoo_report_schedule · odoo_translate_get
 **审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
 **助手**：odoo_daily_briefing · odoo_help
 **通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
@@ -292,6 +297,20 @@ const ODOO_HELP_TEXT = `### 工具速查（共 189 个）
 | 配 webhook / 出站 webhook / 创建 webhook | **odoo_webhook_create** |
 | 把这条记录链接发我 / 分享给客户 / portal 链接 | **odoo_record_share_url** |
 | 邮件队列 / 邮件为啥没发 / mail queue 健康 | **odoo_mail_queue** |
+| 有哪些审批分类 / 审批种类 / 公司审批流程 | **odoo_approval_categories** |
+| 我要请假 / 提个采购申请 / 申请出差报销 | **odoo_approval_create** |
+| 提交审批 / 把这条审批送出去 | **odoo_approval_confirm** |
+| 我有几条要批的 / 待审批 / 我手上的审批 | **odoo_approval_my_pending** |
+| 复制这条记录 / 克隆订单 / 拷贝产品 | **odoo_record_clone** |
+| 深复制带子表 / 复制销售单含明细 | **odoo_record_clone_with_lines** |
+| CSV 导入 / 批量导入数据 / 上传数据 | **odoo_csv_import** |
+| 谁关注了这条 / 关注者列表 / followers | **odoo_followers** |
+| 关注这个商机 / 订阅记录 / 加入关注 | **odoo_subscribe** |
+| 取消关注 / 不再订阅 / 退订 | **odoo_unsubscribe** |
+| 看资源 / 设备列表 / 会议室 | **odoo_resources** |
+| 工作时间表 / 班表 / 一周工作时间 | **odoo_resource_calendar** |
+| 定期发报表 / 自动发 PDF / 报表订阅 | **odoo_report_schedule** |
+| 看现有翻译 / 这字段有几种语言 | **odoo_translate_get** |
 | 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
 | 断开连接 / 退出系统 | **odoo_disconnect** |
 
@@ -488,7 +507,7 @@ async function loggedWrite(
 // ── 注册工具（共 190 个，含 v1.19 odoo_help）───────────────────────────────
 // v1.20 ⭐ 引入工具分级（tier）——默认只暴露 30 个高频核心工具，节省 ~14000 tokens prompt schema
 //   tier='core'（默认）：30 个高频工具直接可见，覆盖 80% 日常场景
-//   tier='extended'：全部 190 个工具可见（v1.19 行为）
+//   tier='extended'：全部 204 个工具可见（v1.19/v1.20 全量行为）
 //   tier='minimal'：仅 10 个最小集（仅核心连接和任务）
 // 用户在 ~/.openclaw/openclaw.json 改 plugins.entries.odoo.config.tier 切换：
 //   "plugins": { "entries": { "odoo": { "config": { "tier": "extended" } } } }
@@ -536,7 +555,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 包装 api.registerTool —— 仅注册 tier 内的工具
   const register = <T extends { name: string }>(opts: T) => {
     if (allowedTools === null || allowedTools.has(opts.name) || opts.name === 'odoo_help') {
-      api.registerTool(opts as Parameters<typeof api.registerTool>[0]);
+      api.registerTool(opts as unknown as Parameters<typeof api.registerTool>[0]);
       registeredCount += 1;
     } else {
       skippedCount += 1;
@@ -4068,6 +4087,351 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ══════════════════════════════════════════════════════
+  // 审批发起 + 克隆 + 关注 + 资源 + 报表订阅 + 多语言（v1.20 新增 14 个）
+  //   审批 4 + 克隆/导入 3 + Mail 关注 3 + 资源 2 + 报表订阅 1 + 多语言 1
+  // ══════════════════════════════════════════════════════
+
+  // ---------- 审批工作流深化 4 ----------
+
+  api.registerTool({
+    name: 'odoo_approval_categories',
+    description: '查审批分类列表（approval.category）。返回每个分类的 approval_minimum（需要几人审批）/ approval_type（请假/采购/差旅...）。给 odoo_approval_create 配料用。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:     { type: 'string', description: '名称模糊搜' },
+        only_active: { type: 'boolean', description: '只看活跃，默认 true' },
+        limit:       { type: 'number', description: '默认 50' },
+      },
+    },
+    async handler(p: { keyword?: string; only_active?: boolean; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getApprovalCategories(p);
+        return { success: true, count: records.length, categories: records.map(r => ({
+          id: r['id'], name: r['name'], minimum: r['approval_minimum'],
+          type: r['approval_type'], company: r['company_id'],
+          auto_seq: r['automated_sequence'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_approval_create',
+    description: '【发起审批】创建审批请求（approval.request）+ 可选 auto_confirm=true 立即提交审批（状态从 new → pending）。reason / amount / quantity / location / partner_id 按分类需要选填。',
+    schema: {
+      type: 'object',
+      properties: {
+        category_id:   { type: 'number', description: '审批分类 id（必填）' },
+        name:          { type: 'string', description: '审批主题，不填用 category 默认' },
+        reason:        { type: 'string', description: '原因/详情（HTML 也可）' },
+        date_start:    { type: 'string', description: '开始时间 YYYY-MM-DD HH:MM:SS（如请假）' },
+        date_end:      { type: 'string', description: '结束时间' },
+        quantity:      { type: 'number', description: '数量（如设备申请）' },
+        amount:        { type: 'number', description: '金额（如报销）' },
+        location:      { type: 'string', description: '地点（如出差）' },
+        partner_id:    { type: 'number', description: '关联联系人' },
+        auto_confirm:  { type: 'boolean', description: '是否立即提交审批，默认 false（保留 new 状态等待）' },
+      },
+      required: ['category_id'],
+    },
+    async handler(p: { category_id: number; name?: string; reason?: string; date_start?: string; date_end?: string; quantity?: number; amount?: number; location?: string; partner_id?: number; auto_confirm?: boolean }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.createApprovalRequest(p);
+        return { success: true, ...result, message: `审批请求 #${result.request_id} 已创建。${result.actions.join('；')}` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_approval_confirm',
+    description: '【发起人侧】把已创建（new 状态）的审批请求提交审批（action_confirm，new → pending）。批量传 ids。',
+    schema: {
+      type: 'object',
+      properties: { request_ids: { type: 'array', items: { type: 'number' }, description: '审批请求 id 数组（必填）' } },
+      required: ['request_ids'],
+    },
+    async handler(p: { request_ids: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        await client.confirmApprovalRequest(p.request_ids);
+        return { success: true, message: `审批请求 ${p.request_ids.map(i => '#'+i).join(', ')} 已提交（new → pending）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_approval_my_pending',
+    description: '【审批人视角】我手上待审批的请求（request_status=pending 且 approver_ids 包含当前用户）。一句话回答"我有几条要批的"。',
+    schema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: '默认 30' } },
+    },
+    async handler(p: { limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getMyPendingApprovals(p);
+        return { success: true, count: records.length, pending: records.map(r => ({
+          id: r['id'], name: r['name'], category: r['category_id'],
+          owner: r['request_owner_id'], date: r['date'],
+          amount: r['amount'], reason: r['reason'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 数据克隆 / 导入 3 ----------
+
+  api.registerTool({
+    name: 'odoo_record_clone',
+    description: '浅复制一条记录（BaseModel.copy）。Odoo 内置方法，所有 model 都有。可用 overrides 字典覆盖某些字段（如 name "[Copy] xxx"）。注意 O2m 子表复制行为各 model 不同——简单 model 自动跟，复杂 model（sale.order/mrp.bom）建议用 odoo_record_clone_with_lines。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:     { type: 'string', description: '模型技术名（必填）' },
+        record_id: { type: 'number', description: '源记录 id（必填）' },
+        overrides: { type: 'object', description: '覆盖字段，传给 copy(default=...)' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number; overrides?: Record<string, unknown> }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.cloneRecord(p);
+        return { success: true, ...data, message: `${p.model} #${p.record_id} 已复制为 #${data.clone_id}。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_record_clone_with_lines',
+    description: '深度复制带子表的记录。先 copy 主记录（清空子表），再读取源子表 + 用 [0,0,vals] 重新挂到新主记录。例：sale.order 用 line_field=order_line / line_model=sale.order.line。line_fields 列出要复制的子表字段名。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:        { type: 'string', description: '主模型技术名（必填）' },
+        record_id:    { type: 'number', description: '源主记录 id（必填）' },
+        line_field:   { type: 'string', description: '主表上的 O2m 字段名（必填，如 order_line）' },
+        line_model:   { type: 'string', description: '子表模型技术名（必填，如 sale.order.line）' },
+        line_fields:  { type: 'array', items: { type: 'string' }, description: '子表要复制的字段名（必填）' },
+        overrides:    { type: 'object', description: '主记录 copy 时的覆盖字段' },
+      },
+      required: ['model', 'record_id', 'line_field', 'line_model', 'line_fields'],
+    },
+    async handler(p: { model: string; record_id: number; line_field: string; line_model: string; line_fields: string[]; overrides?: Record<string, unknown> }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.cloneRecordWithLines(p);
+        return { success: true, ...data, message: `${p.model} #${p.record_id} 深复制为 #${data.clone_id}（含 ${data.lines_copied} 行子表）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_csv_import',
+    description: '【批量】把 CSV 行数据导入到任意 model。逐行 create，全数字字符串自动转 number / true|false 转 bool。返回 imported_ids[] 和 failed_rows[]。失败行不会回滚已成功的。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:   { type: 'string', description: '目标模型（必填）' },
+        headers: { type: 'array', items: { type: 'string' }, description: '字段名数组（必填，对应每列）' },
+        rows:    { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: '数据行二维数组（必填）' },
+      },
+      required: ['model', 'headers', 'rows'],
+    },
+    async handler(p: { model: string; headers: string[]; rows: string[][] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.importCsv(p);
+        return { success: true, ...data,
+          message: `已导入 ${data.imported_ids.length} 条；${data.failed_rows.length} 行失败。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- Mail 关注（3） ----------
+
+  api.registerTool({
+    name: 'odoo_followers',
+    description: '查某条记录的关注者列表（mail.followers）。每条记录可被多个 partner 关注，关注者会收到该记录的 chatter 通知。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:     { type: 'string', description: '模型技术名（必填）' },
+        record_id: { type: 'number', description: '记录 id（必填）' },
+        limit:     { type: 'number', description: '默认 100' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getFollowers(p);
+        return { success: true, count: records.length, followers: records.map(r => ({
+          id: r['id'], partner: r['partner_id'],
+          model: r['res_model'], record_id: r['res_id'],
+          subtypes: r['subtype_ids'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_subscribe',
+    description: '订阅某条记录（mail_thread.message_subscribe）。partner_ids 不填默认订阅当前用户的 partner。订阅后该 partner 会收到记录的 chatter 通知。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:        { type: 'string', description: '模型技术名（必填）' },
+        record_id:    { type: 'number', description: '记录 id（必填）' },
+        partner_ids:  { type: 'array', items: { type: 'number' }, description: '关注者 partner ids，不填默认订阅我自己' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number; partner_ids?: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.subscribeRecord(p);
+        return { success: true, ...data, message: `已订阅 ${p.model} #${p.record_id}（partners: ${data.partner_ids.join(', ')}）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_unsubscribe',
+    description: '取消订阅某记录（mail_thread.message_unsubscribe）。partner_ids 不填默认取消我自己的订阅。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:        { type: 'string', description: '模型技术名（必填）' },
+        record_id:    { type: 'number', description: '记录 id（必填）' },
+        partner_ids:  { type: 'array', items: { type: 'number' }, description: '要取消的 partner ids，不填默认取消我自己' },
+      },
+      required: ['model', 'record_id'],
+    },
+    async handler(p: { model: string; record_id: number; partner_ids?: number[] }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.unsubscribeRecord(p);
+        return { success: true, ...data, message: `已取消 ${p.model} #${p.record_id} 的订阅（partners: ${data.partner_ids.join(', ')}）。` };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 资源 / 工作时间表 2 ----------
+
+  api.registerTool({
+    name: 'odoo_resources',
+    description: '查询资源列表（resource.resource）。resource_type 可筛 user（员工资源）或 material（设备/会议室/物料资源）。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword:       { type: 'string', description: '资源名模糊搜' },
+        resource_type: { type: 'string', enum: ['user', 'material'], description: '类型筛选' },
+        limit:         { type: 'number', description: '默认 50' },
+      },
+    },
+    async handler(p: { keyword?: string; resource_type?: 'user' | 'material'; limit?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const records = await client.getResources(p);
+        return { success: true, count: records.length, resources: records.map(r => ({
+          id: r['id'], name: r['name'], type: r['resource_type'],
+          user: r['user_id'], company: r['company_id'],
+          calendar: r['calendar_id'], tz: r['tz'],
+          time_efficiency: r['time_efficiency'],
+        })) };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  api.registerTool({
+    name: 'odoo_resource_calendar',
+    description: '查工作时间表详情（resource.calendar）+ 自动展开 attendance_ids（每周班次：周几/几点开始/几点结束/上午下午）。用于"X 资源/员工的工作时间是怎么定义的"。',
+    schema: {
+      type: 'object',
+      properties: { calendar_id: { type: 'number', description: 'resource.calendar id（必填）' } },
+      required: ['calendar_id'],
+    },
+    async handler(p: { calendar_id: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getResourceCalendar(p.calendar_id);
+        return { success: true, ...data,
+          attendance_count: data.attendances.length };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 报表订阅 1 ----------
+
+  api.registerTool({
+    name: 'odoo_report_schedule',
+    description: '【自动化】定期发送 PDF 报表订阅。组合 ir.actions.server (state=code) + ir.cron 两对象，让 cron 周期性渲染 report_ref 报表 + 写入收件箱。interval_type: minutes/hours/days/weeks/months。',
+    schema: {
+      type: 'object',
+      properties: {
+        name:            { type: 'string', description: '订阅名（必填）' },
+        report_ref:      { type: 'string', description: 'ir.actions.report xml id，如 sale.action_report_saleorder（必填）' },
+        model:           { type: 'string', description: '报表对应模型，如 sale.order（必填）' },
+        record_domain:   { type: 'string', description: 'Odoo domain 字符串筛选记录，如 "[(\'state\',\'=\',\'sale\')]"' },
+        interval_number: { type: 'number', description: '间隔数（必填）' },
+        interval_type:   { type: 'string', enum: ['minutes','hours','days','weeks','months'], description: '间隔单位（必填）' },
+        next_call:       { type: 'string', description: '首次执行 YYYY-MM-DD HH:MM:SS' },
+        user_id:         { type: 'number', description: 'scheduler 身份 res.users id' },
+      },
+      required: ['name', 'report_ref', 'model', 'interval_number', 'interval_type'],
+    },
+    async handler(p: { name: string; report_ref: string; model: string; record_domain?: string; interval_number: number; interval_type: 'minutes'|'hours'|'days'|'weeks'|'months'; next_call?: string; user_id?: number }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const result = await client.scheduleReportEmail(p);
+        return { success: true, ...result, message: result.actions.join('；') };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ---------- 多语言 1 ----------
+
+  api.registerTool({
+    name: 'odoo_translate_get',
+    description: '读某条记录某字段的所有语言翻译（model.get_field_translations）。返回 { lang_code: value } 对象。和 odoo_translate_record（写）配套，用来"先看现有翻译再决定改不改"。',
+    schema: {
+      type: 'object',
+      properties: {
+        model:     { type: 'string', description: '模型技术名（必填）' },
+        record_id: { type: 'number', description: '记录 id（必填）' },
+        field:     { type: 'string', description: '字段名（必填，必须是 translate=True 的）' },
+      },
+      required: ['model', 'record_id', 'field'],
+    },
+    async handler(p: { model: string; record_id: number; field: string }, ctx: Record<string, unknown>) {
+      const client = getClient(ctx);
+      if (!client) return notConnected();
+      try {
+        const data = await client.getRecordTranslations(p);
+        return { success: true, ...data,
+          lang_count: Object.keys(data.translations).length };
+      } catch (e) { return { success: false, message: String(e) }; }
+    },
+  });
+
+  // ══════════════════════════════════════════════════════
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
@@ -5510,10 +5874,10 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   if (tier === 'extended') {
-    api.logger.info(`[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=extended 全量；含 v1.19 odoo_help、v1.18 Studio 元编程+审计+多公司+通用报表+外部集成）`);
+    api.logger.info(`[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=extended 全量 204 工具；v1.20 新增审批发起+克隆/导入+Mail 关注+资源工作时间+报表订阅+多语言读 14 个；含 v1.19 odoo_help、v1.18 Studio 元编程+审计+多公司）`);
   } else {
     api.logger.info(
-      `[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=${tier} 精简档位 / 跳过 ${skippedCount} 个不在 ${tier} 集合内的工具，节省 ~${Math.round(skippedCount * 80)} tokens schema）。完整 190 工具调 odoo_help 查；改 ~/.openclaw/openclaw.json 的 plugins.entries.odoo.config.tier="extended" 可恢复全量。`
+      `[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=${tier} 精简档位 / 跳过 ${skippedCount} 个不在 ${tier} 集合内的工具，节省 ~${Math.round(skippedCount * 80)} tokens schema）。完整 204 工具调 odoo_help 查；改 ~/.openclaw/openclaw.json 的 plugins.entries.odoo.config.tier="extended" 可恢复全量。`
     );
   }
 }
