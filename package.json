@@ -1,6 +1,6 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "火一五·辉火云企业套件插件 — 自然语言操作辉火云企业套件，企业级全场景 ERP + 系统管理 + Studio 元编程助手，189 个工具覆盖销售/采购/库存/生产/会计/HR/项目/CRM/客服/知识/通知/智能/报表 13 业务域 + 系统级（自动化/治理/批量/集成）+ Studio 元编程；v1.10 共享凭据；v1.11–v1.13 HR 三步走；v1.14 Analytics & Orchestration；v1.15 个人视图+CRM 智能+跨域桥+库存深化+多公司；v1.16 业务深化（采购/MRP/会计 + 智能洞察 + 报表）；v1.17 自动化与治理；v1.18 Studio 元编程（ir.model/ir.model.fields 创建 + 模型字段查询）+ 审计变更追踪（mail.tracking.value 联表 + 字段历史）+ 多公司联动（switch + consolidated_dashboard）+ 通用 pivot 数据 + 邮件日志 + 外部集成（webhook 创建/portal 分享 URL/邮件队列健康）",
   "type": "module",
   "main": "index.ts",

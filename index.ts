@@ -485,14 +485,69 @@ async function loggedWrite(
   });
 }
 
-// ── 注册工具（共 32 个）──────────────────────────────────────────────────────
+// ── 注册工具（共 190 个，含 v1.19 odoo_help）───────────────────────────────
+// v1.20 ⭐ 引入工具分级（tier）——默认只暴露 30 个高频核心工具，节省 ~14000 tokens prompt schema
+//   tier='core'（默认）：30 个高频工具直接可见，覆盖 80% 日常场景
+//   tier='extended'：全部 190 个工具可见（v1.19 行为）
+//   tier='minimal'：仅 10 个最小集（仅核心连接和任务）
+// 用户在 ~/.openclaw/openclaw.json 改 plugins.entries.odoo.config.tier 切换：
+//   "plugins": { "entries": { "odoo": { "config": { "tier": "extended" } } } }
+// odoo_help 工具始终注册（任何 tier），LLM 通过它按需查完整工具表。
+const ODOO_TOOL_TIERS = {
+  // 最小集（10）——仅连接和最核心任务
+  minimal: new Set<string>([
+    'odoo_connect', 'odoo_status', 'odoo_disconnect', 'odoo_whoami', 'odoo_help',
+    'odoo_create_task', 'odoo_list_tasks', 'odoo_my_today',
+    'odoo_search', 'odoo_daily_briefing',
+  ]),
+  // 核心 30 个（默认）——覆盖 80% 日常需求
+  core: new Set<string>([
+    // 连接&状态 (5)
+    'odoo_connect', 'odoo_status', 'odoo_disconnect', 'odoo_whoami', 'odoo_help',
+    // 任务&活动 (8)
+    'odoo_create_task', 'odoo_list_tasks', 'odoo_update_task', 'odoo_my_today', 'odoo_my_workload',
+    'odoo_create_activity', 'odoo_calendar_today', 'odoo_complete_activity',
+    // CRM (5)
+    'odoo_crm_pipeline', 'odoo_crm_create', 'odoo_crm_update', 'odoo_crm_won', 'odoo_crm_lost',
+    // 项目 (2)
+    'odoo_project_overview', 'odoo_timesheet_log',
+    // 客服 (2)
+    'odoo_tickets', 'odoo_ticket_create',
+    // 财务 (3)
+    'odoo_invoices', 'odoo_sale_orders', 'odoo_purchase_orders',
+    // 联系人 (2)
+    'odoo_contacts', 'odoo_contact_create',
+    // 检索/概况 (2)
+    'odoo_search', 'odoo_daily_briefing',
+    // 消息 (1)
+    'odoo_message_post',
+  ]),
+};
+
 function registerTools(api: OpenClawPluginApi) {
+  // 读 tier 配置
+  const cfg = (api.pluginConfig ?? {}) as { tier?: 'minimal' | 'core' | 'extended' };
+  const tier: 'minimal' | 'core' | 'extended' = cfg.tier ?? 'core';
+  const allowedTools: Set<string> | null = tier === 'extended' ? null : ODOO_TOOL_TIERS[tier];
+
+  let registeredCount = 0;
+  let skippedCount = 0;
+
+  // 包装 api.registerTool —— 仅注册 tier 内的工具
+  const register = <T extends { name: string }>(opts: T) => {
+    if (allowedTools === null || allowedTools.has(opts.name) || opts.name === 'odoo_help') {
+      api.registerTool(opts as Parameters<typeof api.registerTool>[0]);
+      registeredCount += 1;
+    } else {
+      skippedCount += 1;
+    }
+  };
 
   // ══════════════════════════════════════════════════════
   // 连接 & 状态
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_connect',
     description: '连接辉火云企业套件。默认保存为【共享凭据】—— 组织内所有渠道（企微/钉钉/飞书）的所有 agent 都会自动复用，无需每个人重新输入。如需给当前会话单独使用一套专属凭据，传 private=true。db 为可选，不传则自动检测（单库自动、多库返回列表）。',
     schema: {
@@ -545,7 +600,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_status',
     description: '检查辉火云企业套件连接状态',
     schema: { type: 'object', properties: {} },
@@ -557,7 +612,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_disconnect',
     description: '断开当前会话的辉火云企业套件连接。默认安全模式：只清除当前 agent 的【独立凭据】（如有），不会影响组织的【共享凭据】。如需彻底清除全员共用的共享凭据（高危，会导致所有成员断开），传 force_shared=true。',
     schema: {
@@ -598,7 +653,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_whoami',
     description: '查看当前 @ 机器人的会话使用的是哪套辉火云凭据 —— 共享凭据 / 当前会话专属 / manifest 静态预填 / 未连接。用于排查"为什么 @ 机器人时没问我密码？"或"我的连接是哪套？"等疑问。',
     schema: { type: 'object', properties: {} },
@@ -640,7 +695,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 任务 / 待办
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_create_task',
     description: '创建待办任务。用于"帮我写个待办"、"创建任务"等指令。',
     schema: {
@@ -665,7 +720,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_list_tasks',
     description: '查看我的待办任务（To-Do 应用，私人任务，无项目）。默认只看进行中。',
     schema: {
@@ -690,7 +745,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_get_task_stages',
     description: '查看项目任务阶段列表（stage_id），用于 odoo_update_task 时指定正确的阶段ID。',
     schema: {
@@ -709,7 +764,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_update_task',
     description: '更新任务的阶段（状态）、截止日期、优先级等字段。通过 stage_id 改变任务的工作流状态。',
     schema: {
@@ -755,7 +810,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 活动 / 日历
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_create_activity',
     description: '创建活动提醒（关联到某条记录）。用于"提醒我明天开会"等。',
     schema: {
@@ -781,7 +836,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_list_activities',
     description: '查看今日及逾期活动提醒。用于"我今天有什么活动"等。',
     schema: { type: 'object', properties: { limit: { type: 'number', description: '上限，默认30' } } },
@@ -795,7 +850,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_activity_types',
     description: '查询辉火云企业套件可用的活动类型列表（获取 activity_type_id）',
     schema: { type: 'object', properties: {} },
@@ -809,7 +864,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_create_event',
     description: '创建日历事件/会议。用于"安排一个会议"、"明天上午10点开产品评审"等。',
     schema: {
@@ -837,7 +892,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 消息
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_get_messages',
     description: '查看未读消息和邮件通知。用于"查看我的消息"、"看看邮件"等。',
     schema: {
@@ -865,7 +920,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_send_message',
     description: '向某条 辉火云记录发送 chatter 消息。',
     schema: {
@@ -892,7 +947,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 通用搜索
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_search',
     description: '通用搜索辉火云企业套件任意数据模型。用于"查客户"、"查销售订单"、"查库存"等。',
     schema: {
@@ -920,7 +975,7 @@ function registerTools(api: OpenClawPluginApi) {
   // CRM 商机
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_pipeline',
     description: '查看 CRM 商机管道。用于"查看我的商机"、"销售管道情况"等。',
     schema: {
@@ -944,7 +999,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_create',
     description: '创建 CRM 商机或线索。用于"新建一个商机"等。',
     schema: {
@@ -971,7 +1026,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_update',
     description: '更新商机信息（阶段、金额、概率、截止日期等）。',
     schema: {
@@ -1013,7 +1068,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_won',
     description: '将商机标记为赢单。用于"这个商机赢了"等。',
     schema: { type: 'object', properties: { lead_id: { type: 'number', description: '商机ID（必填）' } }, required: ['lead_id'] },
@@ -1027,7 +1082,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_lost',
     description: '将商机标记为输单/丢失。',
     schema: {
@@ -1052,7 +1107,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 项目概览 & 工时
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_project_overview',
     description: '查看项目列表和里程碑进度。用于"项目情况"、"里程碑进度"等。',
     schema: {
@@ -1079,7 +1134,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_timesheet_log',
     description: '记录工时。用于"记录2小时工时"、"今天在项目A上工作了3小时"等。',
     schema: {
@@ -1107,7 +1162,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 销售 & 采购
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_sale_orders',
     description: '查看销售订单/报价单列表。用于"查看销售订单"、"报价单情况"等。',
     schema: {
@@ -1128,7 +1183,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_purchase_orders',
     description: '查看采购订单/询价单列表。用于"查看采购订单"等。',
     schema: {
@@ -1152,7 +1207,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 客服工单（Helpdesk）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_tickets',
     description: '查看客服工单列表。用于"查看工单"、"有哪些待处理问题"等。',
     schema: {
@@ -1176,7 +1231,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_ticket_create',
     description: '创建客服工单。用于"帮我提交一个问题"、"新建工单"等。',
     schema: {
@@ -1205,7 +1260,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 财务 / 发票
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_invoices',
     description: '查看发票/账单列表，支持查逾期应收。用于"查看发票"、"逾期未付款的"等。',
     schema: {
@@ -1234,7 +1289,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 联系人 / 客户（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_contacts',
     description: '查询联系人/客户/供应商。用于"查客户"、"找供应商"、"搜索联系人"等。',
     schema: {
@@ -1257,7 +1312,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_contact_create',
     description: '创建联系人/客户/供应商。用于"添加新客户"、"创建联系人"等。',
     schema: {
@@ -1295,7 +1350,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 库存（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_stock_levels',
     description: '查看库存水平。用于"查库存"、"产品XX还有多少"等。',
     schema: {
@@ -1317,7 +1372,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_stock_pickings',
     description: '查看调拨单/出入库单。用于"查看待出库"、"调拨单情况"等。',
     schema: {
@@ -1342,7 +1397,7 @@ function registerTools(api: OpenClawPluginApi) {
   // HR 员工 / 考勤 / 请假（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_employees',
     description: '查询员工列表。用于"查员工"、"某部门有谁"等。',
     schema: {
@@ -1363,7 +1418,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leaves',
     description: '查看请假记录。用于"我的请假记录"、"查看某人的请假"等。',
     schema: {
@@ -1384,7 +1439,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_attendances',
     description: '查看考勤打卡记录。用于"我的考勤"、"打卡记录"等。',
     schema: {
@@ -1411,7 +1466,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 请假闭环（5 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_types',
     description: '查询请假类型列表（hr.leave.type），用于"有哪些假可以请"、"请假类型"。新建请假前先调一次拿到 holiday_status_id。',
     schema: {
@@ -1434,7 +1489,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_create',
     description: '创建请假申请（hr.leave）。用于"我请假明天 / 我请假 5.1–5.3 / 帮某员工请病假"。日期格式 YYYY-MM-DD。先用 odoo_leave_types 查 holiday_status_id。',
     schema: {
@@ -1458,7 +1513,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_approve',
     description: '批准请假申请（hr.leave.action_approve）。会自动按 validation_type 推进到下一阶段（confirm→validate1→validate）。需要"我"是该请假的审批人。',
     schema: {
@@ -1476,7 +1531,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_refuse',
     description: '拒绝请假申请（hr.leave.action_refuse）。',
     schema: {
@@ -1494,7 +1549,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_allocate',
     description: '【HR/管理员动作】给员工分配请假额度（hr.leave.allocation）。用于"给张三加 5 天年假"、"补一下王五本年度调休额度"。auto_approve=true 时会立即调 action_approve 直接生效（需要 hr_holidays.group_hr_holidays_user 权限）。',
     schema: {
@@ -1524,7 +1579,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 报销闭环（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_expenses',
     description: '查询报销列表（hr.expense）。用于"我的报销"、"待批的报销"。state 可筛 draft/submitted/approved/posted/paid/refused。',
     schema: {
@@ -1549,7 +1604,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_expense_create',
     description: '创建报销（hr.expense）。用于"我要报销 200 块的差旅"、"报销昨天的客户餐饮 350 元"。total_amount 是总金额（首选）。employee_id 不填则归到当前用户。',
     schema: {
@@ -1576,7 +1631,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_expense_submit',
     description: '提交报销给经理审批（hr.expense.action_submit / action_submit_sheet）。用于"把这条报销提交"、"批量提交我所有 draft 报销"。',
     schema: {
@@ -1594,7 +1649,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_expense_approve',
     description: '批准或拒绝报销（hr.expense.action_approve / action_refuse）。action="approve"/"refuse"。需要相应权限（团队审批人/财务）。',
     schema: {
@@ -1622,7 +1677,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 招聘闭环（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_applicants',
     description: '查询应聘者列表（hr.applicant）。用于"看招聘 pipeline"、"某岗位的候选人"、"等待面试的"。可按 job_id/stage_id 筛选；keyword 模糊匹配姓名/邮箱。',
     schema: {
@@ -1652,7 +1707,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_applicant_move_stage',
     description: '移动应聘者的招聘阶段或更改 kanban 状态（hr.applicant.write）。用于"把张三推进到面试阶段"、"标记候选人 #88 为 done"、"拒绝应聘者并填理由"。先用 odoo_search(model="hr.recruitment.stage") 查阶段 id；用 odoo_search(model="hr.applicant.refuse.reason") 查拒绝理由 id。',
     schema: {
@@ -1683,7 +1738,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 考核 / 工资 / 排班（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_appraisals',
     description: '查询员工考核列表（hr.appraisal）。state: 1_new=待启动 / 2_pending=进行中 / 3_done=完成。only_mine=true 时只看我作为 reviewer 的考核。',
     schema: {
@@ -1709,7 +1764,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_payslips',
     description: '查询工资单列表（hr.payslip）。需要 hr_payroll.group_hr_payroll_user 权限。state: draft/verify/done/paid/cancel。不填 employee_id 默认查当前用户。',
     schema: {
@@ -1736,7 +1791,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_planning_shifts',
     description: '查询排班 / 班次（planning.slot）。用于"我这周的班"、"客服团队这周排班"。date_from/to 默认今天到 7 天后。',
     schema: {
@@ -1771,7 +1826,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 工资单生命周期（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_payslip_validate',
     description: '【HR/财务】验证工资单（hr.payslip.action_payslip_done），状态从 draft → done。需要 hr_payroll.group_hr_payroll_user 权限。批量传 ids。',
     schema: {
@@ -1789,7 +1844,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_payslip_paid',
     description: '【HR/财务】标记工资单已支付（hr.payslip.action_payslip_paid），状态从 done → paid。需要 hr_payroll.group_hr_payroll_user 权限。',
     schema: {
@@ -1807,7 +1862,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_payslip_cancel',
     description: '【HR】取消工资单（hr.payslip.action_payslip_cancel），任何状态 → cancel。',
     schema: {
@@ -1827,7 +1882,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 考核闭环（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_appraisal_action',
     description: '推进绩效考核状态（hr.appraisal）。action="confirm" 启动（1_new→2_pending）；"done" 完成（2_pending→3_done）；"back" 退回草稿。',
     schema: {
@@ -1851,7 +1906,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 招聘助手（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_recruitment_stages',
     description: '查询招聘阶段列表（hr.recruitment.stage）。给 odoo_applicant_move_stage 提供 stage_id。可按 job_id 筛选只属于某岗位的阶段。',
     schema: {
@@ -1871,7 +1926,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_recruitment_refuse_reasons',
     description: '查询拒绝候选人的理由列表（hr.applicant.refuse.reason）。给 odoo_applicant_move_stage 的 refuse_reason_id 提供选项。',
     schema: { type: 'object', properties: {} },
@@ -1885,7 +1940,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_recruitment_create_meeting',
     description: '为应聘者创建面试日历事件（calendar.event + applicant_id）。会自动把应聘者的 partner 和招聘官 partner 加为参会人；如果应聘者还没 partner_id 会自动建一个。start 是 YYYY-MM-DD HH:MM:SS，duration 单位为小时（默认 1）。',
     schema: {
@@ -1913,7 +1968,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 排班发布 / 取消发布（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_planning_publish',
     description: '发布排班 / 班次（planning.slot）。notify=true（默认）会逐条调 action_send 自动给员工发邮件并置为 published；notify=false 则只 write state="published" 不发通知。',
     schema: {
@@ -1935,7 +1990,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_planning_unpublish',
     description: '【planning manager】取消发布排班，published → draft（planning.slot.action_unpublish）。需要 planning.group_planning_manager 权限。',
     schema: {
@@ -1955,7 +2010,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 技能管理（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_skills',
     description: '查询员工技能列表（hr.employee.skill）。不填 employee_id 默认查当前用户；可按 skill_type_id 筛某类技能（如"编程语言"、"语言"）。',
     schema: {
@@ -1979,7 +2034,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_skill_add',
     description: '给员工添加一项技能（hr.employee.skill）。需要 hr.group_hr_user 权限（员工自己也可以加自己的）。先用 odoo_skills_catalog 查 skill_type_id / skill_id / skill_level_id。',
     schema: {
@@ -2002,7 +2057,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_skills_catalog',
     description: '查询技能目录（hr.skill / hr.skill.type / hr.skill.level）。一次返回三类 master data 给上层调用方（odoo_employee_skill_add）拼参数用。可按 skill_type_id / keyword 筛选。',
     schema: {
@@ -2030,7 +2085,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 远程办公（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_homeworking_set',
     description: '设置员工某天的工作地点（hr.employee.location，hr_homeworking 模块）。用于"明天我远程"、"周一到周三在家办公"。同一员工同一天唯一约束，已有则覆盖。先用 odoo_search(model="hr.work.location") 查可选地点 id。',
     schema: {
@@ -2054,7 +2109,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 车队（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_fleet_vehicles',
     description: '查询公司车辆（fleet.vehicle）。用于"我有哪辆车"、"销售部的车"、"X 公司车队"。driver_user_id 按司机 res.users id 筛选；keyword 匹配车名/车牌。',
     schema: {
@@ -2088,7 +2143,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 员工 CRUD（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_create',
     description: '【HR】创建员工（hr.employee）。用于"入职新员工"、"录入张三"。需要 hr.group_hr_user 权限。Odoo 会按 name 自动建 resource.resource。建议同步填 work_email、department_id、job_id。',
     schema: {
@@ -2119,7 +2174,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_update',
     description: '【HR】修改员工资料（hr.employee.write）。用于"改张三的部门"、"换上级"、"加手机号"等。多字段一次更新。',
     schema: {
@@ -2152,7 +2207,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_archive',
     description: '【HR】归档员工（active=false），用于"离职"、"停用 X 的账号"。员工不会被删除，可通过 odoo_employee_unarchive 恢复。',
     schema: {
@@ -2170,7 +2225,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_unarchive',
     description: '【HR】恢复已归档员工（active=true），用于"返聘"、"重新启用账号"。',
     schema: {
@@ -2190,7 +2245,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- HR 仪表盘（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_hr_dashboard',
     description: '【HR/管理】一句话拿到 HR 全局仪表盘：在编人数 + 部门人数分布 + 今日生日 + 今日请假人 + 待审请假/报销数 + 招聘漏斗 + 在招岗位数。read_group 聚合，单次调用全图。',
     schema: { type: 'object', properties: {} },
@@ -2206,7 +2261,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 部门 / 岗位 / 工作地点（5 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_departments',
     description: '查询部门列表（hr.department）。complete_name 字段含完整层级（如"销售/华北销售/北京组"）。可按父部门 / keyword 筛。',
     schema: {
@@ -2232,7 +2287,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_department_create',
     description: '【HR】创建部门（hr.department）。parent_id 不填则为顶级；manager_id 是部门经理 hr.employee.id。',
     schema: {
@@ -2255,7 +2310,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_jobs',
     description: '查询岗位列表（hr.job）。可按部门筛。expected_employees 是该岗位的预期 / 已招人数。',
     schema: {
@@ -2279,7 +2334,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_job_create',
     description: '【HR】创建岗位（hr.job）。用于"新开个销售经理岗位"。department_id 选填。',
     schema: {
@@ -2302,7 +2357,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_work_locations',
     description: '查询工作地点列表（hr.work.location）。给 odoo_homeworking_set 提供 work_location_id；location_type 可筛 home/office/other。',
     schema: {
@@ -2328,7 +2383,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 合同 / 版本（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_versions',
     description: '查询员工的版本历史（hr.version）。Odoo 19+ 把"合同"重组成员工的多个版本：每次升职/调薪/换部门都会留一条版本记录。wage/date_start/date_end 字段需要 hr_manager 权限才能读，无权时退化只显示基本字段。',
     schema: {
@@ -2356,7 +2411,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 工时洞察（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_timesheet_summary',
     description: '本月工时按项目/任务/员工聚合（account.analytic.line + read_group）。默认查当前用户本月按项目分组。group_by 可选 project/task/employee。',
     schema: {
@@ -2378,7 +2433,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_timesheet_team',
     description: '【经理视角】查我的下属本月工时（按 hr.employee.parent_id = 我对应 employee_id 找直接下属，再聚合 account.analytic.line）。manager_id 不填默认当前用户对应的员工。',
     schema: {
@@ -2403,7 +2458,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 组织架构（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_org_chart',
     description: '查员工的组织架构上下文：经理 + 导师 + 直接下属列表 + 跨级下属总数。用于"看看张三上面是谁"、"我下面有几个人"。',
     schema: {
@@ -2429,7 +2484,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- HR Analytics 进阶（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_attendance_analytics',
     description: '考勤分析（hr.attendance + read_group）。本月或指定区间内员工总工时分布、记录数、按员工聚合。可按部门或员工筛选。默认本月初到今天。',
     schema: {
@@ -2451,7 +2506,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_leave_analytics',
     description: '请假趋势分析（hr.leave + read_group）。区间内按请假类型 + 状态分组，返回总天数。用于"本月谁请假最多"、"全公司请假数据"。',
     schema: {
@@ -2472,7 +2527,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_turnover_metrics',
     description: '入离职率指标。根据 hr.employee.create_date / archive 状态计算近 N 天入职数、离职数，年化 turnover_rate 和 attrition_rate。默认窗口 90 天。',
     schema: {
@@ -2491,7 +2546,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 入离职编排（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_onboarding',
     description: '【HR】入职编排：链式动作 = 创建员工 + 可选创建系统账号（res.users）+ 可选发送入职欢迎 chatter。比单独 odoo_employee_create 多覆盖账号绑定与欢迎流程。create_user=true 且 user_login 已填时会自动建账号。',
     schema: {
@@ -2524,7 +2579,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_employee_offboarding',
     description: '【HR】离职编排：链式动作 = （可选）转移直接下属给 new_manager_id +（可选）拒掉所有未批的请假 +（可选）chatter 留言 + archive 员工。new_manager_id 不填则不转移。',
     schema: {
@@ -2549,7 +2604,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 工时审批闭环（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_timesheet_validate',
     description: '【经理 / timesheet_grid 模块】验证工时（account.analytic.line.action_validate_timesheet）。工时一旦 validated=true 后员工不能再改。要求 timesheet_grid 企业模块已安装。',
     schema: {
@@ -2567,7 +2622,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_timesheet_invalidate',
     description: '【经理 / timesheet_grid 模块】撤销工时验证（action_invalidate_timesheet）。validated=false 让员工可以重新编辑。',
     schema: {
@@ -2587,7 +2642,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 跨域仪表盘（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_sales_dashboard',
     description: '销售仪表盘（sale.order + read_group）。区间内总销售额、订单数、按状态分布、Top10 客户、待开票数、待发货数。默认本月初到今天。',
     schema: {
@@ -2607,7 +2662,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_pipeline_health',
     description: 'CRM 漏斗健康（crm.lead + read_group）。返回阶段分布 / 销售员分布 / 平均概率 / 总管道金额 / 逾期商机数与金额。user_id 不填看全员；days_overdue 默认 0（今天前未跟进的算逾期）。',
     schema: {
@@ -2627,7 +2682,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_invoice_aging',
     description: '应收账款账龄分析（account.move）。把未付/部分付的客户发票按 0–30 / 31–60 / 61–90 / 90+ 天逾期分桶 + 未到期。可按客户筛。',
     schema: {
@@ -2647,7 +2702,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_helpdesk_dashboard',
     description: 'Helpdesk 仪表盘（helpdesk.ticket + read_group）。未关闭工单数、按 stage / priority / 处理人分布、SLA 逾期数、紧急（priority=3）开放数。可按 team_id / user_id 筛。',
     schema: {
@@ -2669,7 +2724,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 项目仪表盘 + 我的工作负荷（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_project_dashboard',
     description: '项目仪表盘（project.project + project.task）。返回项目列表（含任务数）+ 任务总览（开放/完成/逾期）。可按 project_id 单独看一个项目。',
     schema: {
@@ -2686,7 +2741,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_my_workload',
     description: '我的工作负荷一览：当前 user 的开放任务数 / 逾期任务 / 待办活动 / 工单 / 待审批 / 今日日历。一句话回答"我手上还有多少活"。',
     schema: { type: 'object', properties: {} },
@@ -2702,7 +2757,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 薪酬批次（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_payslip_run_create',
     description: '【HR】创建工资单批次（hr.payslip.run），可选 auto_generate=true 同时调 generate_payslips 批量生成 hr.payslip。需要 hr_payroll.group_hr_payroll_user 权限。',
     schema: {
@@ -2734,7 +2789,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 个人视图（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_my_overdues',
     description: '我的所有逾期项一览（任务 + 活动 + 工单 + 客户发票，4 域 Promise.all 并发）。一句话回答"我手上有什么逾期了"。',
     schema: { type: 'object', properties: {} },
@@ -2748,7 +2803,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_my_today',
     description: '我今天所有要做的事（今日截止任务 + 今日活动 + 今日日历 + 今日到期发票）。一句话回答"我今天要做什么"。',
     schema: { type: 'object', properties: {} },
@@ -2762,7 +2817,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_my_unread',
     description: '我所有未读消息（mail.notification + is_read=false + inbox 类型 + 我的 partner）。返回原始消息 + body 预览（去 HTML 截断 200 字）。',
     schema: { type: 'object', properties: {} },
@@ -2778,7 +2833,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- CRM 智能助手（2 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_stale_leads',
     description: '查"长时间没动"的商机（probability < 100 且 date_last_stage_update < 今天-N 天）。默认阈值 14 天。可按销售员筛。',
     schema: {
@@ -2799,7 +2854,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_crm_next_action',
     description: '【智能助手】对单个商机给出"下一步该做什么"的建议。基于 stage 停留天数 + 是否有待办活动 + probability 三个维度做规则推荐，返回 recommendation + suggested_actions（具体调哪个工具）。',
     schema: {
@@ -2819,7 +2874,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 跨模块桥（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_helpdesk_to_task',
     description: '把工单转化为项目任务（helpdesk.ticket → project.task）。会复制 name/description/partner_id/user_id；可选在工单 chatter 留下任务链接（默认 keep_chatter_link=true）。',
     schema: {
@@ -2843,7 +2898,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_lead_to_project',
     description: '商机赢单后建项目（crm.lead → project.project）。复制 name/description/partner_id/user_id 到项目；可选 mark_won=true 顺手标记商机赢单（先调 action_set_won_rainbowman，失败兜底 write probability=100）。会在商机 chatter 留项目链接。',
     schema: {
@@ -2867,7 +2922,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_invoice_send_reminder',
     description: '发送催款提醒（在 account.move chatter 写一条 partner 可见的消息）。默认正文自动包含发票号 + 逾期天数 + 未付金额；可用 custom_message 覆写。',
     schema: {
@@ -2890,7 +2945,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 库存深化（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_stock_low_alerts',
     description: '查触发再订货预警的产品（stock.warehouse.orderpoint where qty_to_order > 0）。返回每条 orderpoint：产品 / 仓库 / min/max 库存 / 建议订货量。',
     schema: {
@@ -2910,7 +2965,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_stock_by_location',
     description: '按库位聚合库存（stock.quant + read_group on location_id）。每个库位返回总在手量、保留量、可用量、SKU 数。可按产品 / 库位 / 公司筛。',
     schema: {
@@ -2931,7 +2986,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_stock_picking_validate',
     description: '【仓库管理员】验证调拨单 / 出入库单（stock.picking.button_validate）。会按 immediate transfer 流程把状态推到 done。需要权限 stock.group_stock_user。',
     schema: {
@@ -2949,7 +3004,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_warehouse_dashboard',
     description: '仓库仪表盘：仓库列表 + 待入库/待出库/待内部调拨/回单数。可按 warehouse_id 筛单一仓库。',
     schema: {
@@ -2968,7 +3023,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 多公司（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_companies',
     description: '列我可访问的公司（res.company），含当前激活公司 + allowed_company_ids。用于"公司列表"、"我属于几家公司"、"切公司前先看有哪些"。',
     schema: { type: 'object', properties: {} },
@@ -2984,7 +3039,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 加权销售预测（1 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_sales_forecast',
     description: '加权销售预测（crm.lead × probability + sale.order 已确认）。返回 weighted_pipeline = Σ(expected_revenue × probability/100)、原始 raw_pipeline、按 stage / 销售员分布、同窗口 confirmed sale.order 总额。horizon_days 默认 90。',
     schema: {
@@ -3011,7 +3066,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 采购深化 4 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_purchase_create',
     description: '创建采购订单（purchase.order）。order_lines 是 [{product_id, product_qty, price_unit?, name?}, ...]。会自动按 partner_id 默认 vendor 设置 + create order_line 子记录。',
     schema: {
@@ -3048,7 +3103,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_purchase_confirm',
     description: '【采购员】确认采购订单（purchase.order.button_confirm），状态从 draft → purchase（下单）。多 id 优先一次批量调，失败 fallback 逐条 for-loop。',
     schema: {
@@ -3066,7 +3121,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_purchase_dashboard',
     description: '采购仪表盘（purchase.order + read_group）。本月或指定区间总采购额、订单数、按状态分布、Top10 供应商、待收货数、待开账单数。',
     schema: {
@@ -3086,7 +3141,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_vendor_bill_aging',
     description: '应付账款账龄分析（账户 move_type=in_invoice）。0–30 / 31–60 / 61–90 / 90+ / 未到期 五桶。可按供应商筛。',
     schema: {
@@ -3108,7 +3163,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 生产 MRP 3 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_mo_list',
     description: '查生产订单列表（mrp.production）。可按状态 / 产品 / 单号关键字筛。state: draft/confirmed/progress/to_close/done/cancel。',
     schema: {
@@ -3134,7 +3189,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_mo_confirm',
     description: '【生产计划员】确认生产订单（mrp.production.action_confirm），draft → confirmed。',
     schema: {
@@ -3152,7 +3207,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_bom_query',
     description: '查询 BOM（mrp.bom）+ 自动展开 bom_line_ids 子物料。可按产品 / BOM id 筛。返回每个 BOM 的 lines 数组（产品 + 用量 + 单位）。',
     schema: {
@@ -3176,7 +3231,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 会计深化 3 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_journal_entries',
     description: '查询会计凭证（account.move where move_type=entry）。区间默认本月。可按 journal / state 筛。',
     schema: {
@@ -3202,7 +3257,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_payment_register',
     description: '【会计】登记付款（走 account.payment.register wizard）。对一组 invoice 调 action_create_payments 自动创建 account.payment 并核销。amount 不填默认全额。',
     schema: {
@@ -3226,7 +3281,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_chart_of_accounts',
     description: '查询会计科目表（account.account）。可按 keyword（code/name）+ account_type 筛。account_type 例：asset_cash, asset_receivable, liability_payable, expense, income。',
     schema: {
@@ -3253,7 +3308,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 智能洞察 2 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_anomaly_detect',
     description: '【运营智能】异常检测：自动扫描 6 类异常（库存负数 / 大额订单 / 老旧未付发票 / 堆积审批 / 停滞商机 / draft 工资单）。返回 anomalies[] 含 type / severity / count / description / sample_ids。',
     schema: { type: 'object', properties: {} },
@@ -3267,7 +3322,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_kpi_summary',
     description: '【老板视角】一句话 7 大 KPI：本月销售额 + 应收余额 + 待处理工单 / SLA 逾期 + 在制生产订单 + 库存预警 + 待审工资单。Promise.all 7 并发。',
     schema: { type: 'object', properties: {} },
@@ -3283,7 +3338,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 报表 / 数据导出 2 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_pdf_report',
     description: '生成 QWeb PDF 报表的下载 URL（不直接拉 base64，避免 RPC payload 爆炸）。报表名是 ir.actions.report 的 xml id（如 sale.action_report_saleorder, account.account_invoices, hr_payroll.action_report_payslip）。返回 url 让用户/客户端去下载。',
     schema: {
@@ -3307,7 +3362,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_export_csv',
     description: '任意模型导 CSV：传 model + fields[]（fields 数组）+ 可选 domain，返回 CSV 字符串。Many2one 字段会自动取 [id, "name"] 的 name。limit 默认 1000。',
     schema: {
@@ -3346,7 +3401,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 流程自动化（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_automations',
     description: '查询自动化规则列表（base.automation）。可按 model_id 筛某模型上的自动化。返回每条规则的触发器、过滤条件、关联 server actions。',
     schema: {
@@ -3372,7 +3427,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_cron_jobs',
     description: '查询计划任务列表（ir.cron）。返回每个 cron 的下次执行时间、间隔、scheduler 用户、关联 server action。',
     schema: {
@@ -3396,7 +3451,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_automation_create',
     description: '【系统管理员】创建自动化规则（base.automation）。trigger 可选：on_create / on_write / on_create_or_write / on_unlink / on_change / on_time / on_time_created / on_time_updated。需要先准备好 server_action_ids（ir.actions.server）。',
     schema: {
@@ -3423,7 +3478,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 数据治理（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_data_quality_partners',
     description: '联系人重复检测（res.partner）。按 email / phone / name 分组找出现 > 1 次的值。返回 duplicate_groups[] 含 key + partner_ids + count，用于后续 odoo_partners_merge。',
     schema: {
@@ -3443,7 +3498,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_data_quality_products',
     description: '产品重复检测（product.product）。按 default_code（SKU）/ barcode / name 分组。返回 duplicate_groups[] 含 key + product_ids + count。',
     schema: {
@@ -3463,7 +3518,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_data_quality_completeness',
     description: '字段完整性扫描：6 类常见"应填未填"（员工无 work_email / 员工无电话 / 员工无上级 / 公司联系人无 email / 客户无国家 / 产品无 SKU）。每项返 model + field + missing_count + severity + sample_ids。',
     schema: { type: 'object', properties: {} },
@@ -3477,7 +3532,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_partners_merge',
     description: '【数据治理】合并重复联系人（base.partner.merge.automatic.wizard._merge）。Odoo 安全限制：单次最多合并 3 个 partner。dst_partner_id 是保留的主记录，其他 partner 的关联（订单、发票、活动）会被转移过来。',
     schema: {
@@ -3500,7 +3555,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 批量操作（3 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_batch_email',
     description: '【批量】按 domain 给一组记录发邮件（用 mail.template）。force_send=false 进队列，不阻塞。先用 odoo_email_templates 找 template_id。',
     schema: {
@@ -3526,7 +3581,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_batch_archive',
     description: '【批量】对一组记录批量改 active 字段（archive=false 归档 / activate=true 激活）。适用于任何带 active 字段的模型。',
     schema: {
@@ -3548,7 +3603,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_batch_assign',
     description: '【批量】把一组记录的经办人改成新的 user_id。适用于工单 / 任务 / 活动 / 商机等。任务用 field="user_ids"（多对多 replace），其他默认 "user_id"（多对一）。',
     schema: {
@@ -3573,7 +3628,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 集成 / 治理（4 个） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_translate_record',
     description: '【多语言】给某条记录的某字段写多语言翻译（model.update_field_translations）。translations 是 { lang: value } 对象，如 { "zh_CN": "中文名", "en_US": "English Name" }。字段必须是 translate=True 的。',
     schema: {
@@ -3596,7 +3651,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_custom_fields',
     description: '查询自定义字段（ir.model.fields where state=\'manual\'，即 x_* 开头的 Studio/手工字段）。可按 model 名称筛某模型，或按 keyword 搜字段名/描述。',
     schema: {
@@ -3621,7 +3676,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_user_create',
     description: '【系统管理员】创建系统用户（res.users）+ 可选关联到 hr.employee + 可选指定权限组。不传 password 时会用 Odoo 默认（需走"邀请邮件"流程让用户自己设密码）。',
     schema: {
@@ -3647,7 +3702,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_user_groups',
     description: '查某用户的所有权限组（res.users.groups_id → res.groups）。user_id 不填默认查当前用户。返回 full_name 包含 category（如"Sales / User: Own Documents Only"）。',
     schema: {
@@ -3671,7 +3726,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- Studio 元编程 4 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_model_list',
     description: '查询 ir.model 模型列表。可按 keyword（模型名 / 描述）+ only_custom 筛选自定义模型 + transient 筛 wizard 模型。给上层定位某模型用。',
     schema: {
@@ -3697,7 +3752,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_model_fields',
     description: '查某模型的所有字段（ir.model.fields）。可按 keyword 搜字段名/描述 + only_custom 筛 x_* 自定义字段。返回 ttype / required / relation / selection / translate 等元数据。',
     schema: {
@@ -3725,7 +3780,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_model_create',
     description: '【系统管理员 / Studio】创建自定义模型（ir.model）。model 技术名必须 x_ 开头（Odoo 强制约束）。state 自动设为 manual。',
     schema: {
@@ -3748,7 +3803,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_field_create',
     description: '【系统管理员 / Studio】给某模型加字段（ir.model.fields）。name 必须 x_ 开头。ttype 决定字段类型（many2one/many2many/one2many 必填 relation；selection 必填 selection）。',
     schema: {
@@ -3778,7 +3833,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 审计与变更追踪 3 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_audit_log',
     description: '查某条记录的全部变更历史（mail.message + mail.tracking.value 联表）。返回每次变更：date / author / field / old_value / new_value。',
     schema: {
@@ -3800,7 +3855,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_login_history',
     description: '查用户登录历史（res.users.log，每次登录留一条）。可按 user_id 筛某用户，days 默认 30。',
     schema: {
@@ -3823,7 +3878,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_field_history',
     description: '【聚焦视图】查某条记录某个字段的所有变更历史。比 odoo_audit_log 更聚焦——只返这一个字段的 from→to 变化序列。用于"X 的 stage 变过几次"、"工资改过几次"。',
     schema: {
@@ -3848,7 +3903,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 多公司联动 2 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_company_switch',
     description: '切换当前用户激活的公司（写 res.users.company_id）。需要 user 在该公司的 allowed company list 里。后续所有 RPC 默认按新公司过滤。',
     schema: {
@@ -3866,7 +3921,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_consolidated_dashboard',
     description: '【集团视角】跨公司聚合仪表盘：按 company_ids（不填用 user.company_ids）汇总每家公司的销售/应收/工单/在编 4 项 + 集团 grand_total。',
     schema: {
@@ -3889,7 +3944,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 报表深化 2 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_pivot_data',
     description: '通用 pivot 数据查询（read_group 通用入口）。measures 是 ["amount_total:sum", "qty:sum"] 这种"字段:聚合函数"。groupby 是 1-2 维分组字段。返回 rows + total 总计。',
     schema: {
@@ -3918,7 +3973,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_email_log',
     description: '查邮件发送日志（mail.mail），按 state 筛 outgoing/sent/exception/cancel。days 默认 7。用于排查"邮件没发出去"。',
     schema: {
@@ -3945,7 +4000,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 外部集成 3 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_webhook_create',
     description: '【系统管理员】创建出站 Webhook：通过 ir.actions.server (state=webhook) + base.automation 触发器组合。当目标模型记录创建/更新/删除时 POST 到 webhook_url。',
     schema: {
@@ -3974,7 +4029,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_record_share_url',
     description: '生成某条记录的分享链接：优先尝试 portal_url（mail.thread.portal_mixin 提供，外部可访问）+ 始终返回 backend_url（后台登录态访问）。用于"把这个商机/工单链接发给客户/同事"。',
     schema: {
@@ -3998,7 +4053,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_mail_queue',
     description: '【运维】邮件队列健康检查：返回 outgoing 待发数、exception 失败数、今日已发数、+ 5 个待发样本 + 5 个失败样本（含 failure_reason）。一句话排查"为什么我的邮件没发出去"。',
     schema: { type: 'object', properties: {} },
@@ -4016,7 +4071,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 审批（v1.2 新增）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_approvals',
     description: '查看审批请求列表。用于"我的审批"、"待审批的"等。',
     schema: {
@@ -4041,7 +4096,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 实施经理每日概况
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_daily_briefing',
     description: '实施经理每日工作概况：今日截止任务、到期活动、待处理工单、逾期发票、商机跟进、未读消息。用于"今天有什么工作"、"给我今日概况"等。',
     schema: { type: 'object', properties: {} },
@@ -4073,7 +4128,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 通知基座（跨渠道）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_notification_status',
     description: '查看辉火云企业套件通知总线状态：已注册的渠道 transport、订阅者数、最近一次 poll 时间、当前 agent 的偏好设置、信封溯源缓存大小。用于"通知推送情况"、"企微/钉钉有没有连上"等排查类问题。',
     schema: { type: 'object', properties: {} },
@@ -4099,7 +4154,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_notification_channels',
     description: '列出当前已注册到通知总线的渠道（如企微、钉钉、飞书、webhook）。仅作为信息查询，真正的连接由各渠道插件自己管理。',
     schema: { type: 'object', properties: {} },
@@ -4114,7 +4169,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_notification_test',
     description: '向通知总线发一条测试 envelope，验证企微/钉钉等渠道是否能收到。用于"测试一下通知"、"看看推送通不通"等。',
     schema: {
@@ -4156,7 +4211,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_notification_prefs',
     description: '查看或更新当前用户的通知偏好。支持：启停总开关、只接收某些类型（todo/activity/message/email/calendar）、优先级下限、静音时段（24h 制，跨午夜 OK）。不传任何参数只做查询。urgent 级别永远绕过静音与优先级过滤。',
     schema: {
@@ -4199,7 +4254,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_notification_reply',
     description: '手动模拟一次从渠道回到辉火云企业套件的入站回复 —— 渠道插件在收到用户回复后应调用这条逻辑（或直接 import notificationBus.reply）。给出 envelope_id + body，辉火云会在对应记录的内部动态里写一条消息。用于排查"企微回复能不能写回系统"。',
     schema: {
@@ -4228,7 +4283,7 @@ function registerTools(api: OpenClawPluginApi) {
   // 知识库（knowledge.article）
   // ══════════════════════════════════════════════════════
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_search',
     description: '搜索 辉火云知识库文章。支持关键词（匹配标题或正文）、分类（workspace/private/shared）、仅收藏、仅顶层、指定父文章。用于"找一下关于 X 的知识库文章"、"列出我收藏的"、"列出工作区顶层文章"。',
     schema: {
@@ -4271,7 +4326,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_read',
     description: '读取单篇知识库文章的完整正文（HTML）。用于"把这篇文章读给我"、"X 文章里写了什么"。body 可能较长，渲染时建议截断。',
     schema: {
@@ -4318,7 +4373,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_create',
     description: '创建知识库文章。顶层文章必须指定 category（workspace=工作区/private=私有）。子文章传 parent_id，权限继承。body 支持 markdown（自动转 HTML）或直接传 HTML。',
     schema: {
@@ -4351,7 +4406,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_update',
     description: '更新知识库文章的标题、图标或正文。body 支持 markdown，传 HTML 时原样保留。想追加内容请用 odoo_knowledge_append。',
     schema: {
@@ -4378,7 +4433,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_append',
     description: '在现有文章末尾追加一段内容（markdown 或 HTML）。适合"把刚才讨论的结论写进 X 文章"这种追加笔记的场景，不会覆盖原有内容。',
     schema: {
@@ -4401,7 +4456,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_tree',
     description: '展示知识库树结构（以 workspace/private 为根，递归最多 N 层）。用于"给我看下知识库长啥样"、"工作区里都有哪些文章"。',
     schema: {
@@ -4448,7 +4503,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_favorite',
     description: '切换知识库文章的收藏状态（已收藏→取消，未收藏→收藏）。用于"收藏这篇"、"取消收藏 X"。',
     schema: {
@@ -4470,7 +4525,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_knowledge_trash',
     description: '把文章送入回收站（或还原）。默认删除，restore=true 时恢复。辉火云回收站里的文章在 knowledge_article_trash_limit_days（默认 30 天）后才真正删除，所以是安全操作。',
     schema: {
@@ -4501,7 +4556,7 @@ function registerTools(api: OpenClawPluginApi) {
   // ══════════════════════════════════════════════════════
 
   // ── 活动闭环 ──────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_complete_activity',
     description: '完成一条活动（闭环）。底层调用 mail.activity.action_feedback：活动从列表移除、反馈写入源记录内部动态。用于"那个催付款的活动做完了"、"把提醒 #X 标记完成，附言：客户已转账"。',
     schema: {
@@ -4522,7 +4577,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_reschedule_activity',
     description: '把活动改到新日期。用于"那个提醒挪到明天"、"推迟到下周一"。需要先有活动 id。',
     schema: {
@@ -4550,7 +4605,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 关注者 ────────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_follow',
     description: '关注某条记录（继承 mail.thread 的任何模型：project.task / crm.lead / helpdesk.ticket / sale.order / res.partner 等）。关注后该记录的新消息、活动会出现在 Inbox。不传 partner_ids 时默认关注我自己。',
     schema: {
@@ -4572,7 +4627,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_unfollow',
     description: '取消关注某条记录。partner_ids 可选，默认取消我自己。',
     schema: {
@@ -4595,7 +4650,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 日历增强 ──────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_calendar_today',
     description: '查今日会议/日程（覆盖 00:00–次日 00:00，含我是组织者或参与者）。用于"今天有什么会"、"今天几点开会"。',
     schema: {
@@ -4623,7 +4678,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_update_event',
     description: '修改日历事件：改时间、地点、标题、描述、参与者。用于"会议挪到下午 3 点"、"把会议地点改到 301 会议室"。',
     schema: {
@@ -4667,7 +4722,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_cancel_event',
     description: '取消（归档）日历事件：active=false。数据保留在系统中不物理删除，可用 odoo_undo_last 还原。',
     schema: {
@@ -4692,7 +4747,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 邮件 ──────────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_send_email',
     description: '发送邮件（走 mail.mail，立即 send）。recipients 是收件人邮箱数组；body 支持 markdown（自动转 HTML）或 HTML。可选挂到某条 辉火云记录：res_model + res_id。',
     schema: {
@@ -4734,7 +4789,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_email_templates',
     description: '列出邮件模板（mail.template）。可按 model 过滤，如"我有哪些商机相关的邮件模板"。',
     schema: {
@@ -4764,7 +4819,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_email_from_template',
     description: '用模板发邮件（mail.template.send_mail，force_send=true）。用于"用那个报价单模板发给客户"。template_id 从 odoo_email_templates 取。',
     schema: {
@@ -4790,7 +4845,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 附件 / 文档 ───────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_attach_file',
     description: '把本地文件上传为辉火云附件（ir.attachment）并挂到指定记录。用于"把这份合同 PDF 附到商机 #42"。path 传本地绝对路径，插件会读文件并 base64 编码。大文件（>5MB）请走 odoo_document_upload。',
     schema: {
@@ -4826,7 +4881,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_list_attachments',
     description: '列出某条记录挂着的所有附件。用于"商机 #42 有哪些附件"、"那个合同有没有上传"。',
     schema: {
@@ -4860,7 +4915,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_document_upload',
     description: '上传文件到辉火云文档应用（documents.document），可指定 folder_id 归档。用于"把这份交接文档归到项目资料夹"。附件上限 20MB。',
     schema: {
@@ -4897,7 +4952,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 批量更新（带变更日志）─────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_bulk_update',
     description: '对同一模型的多条记录做同一组字段更新，写入变更日志，可用 odoo_undo_last 整体撤销。用于"把这批任务都改成已完成"、"这 10 个商机都挪到下一阶段"。谨慎：values 会对所有 ids 生效。',
     schema: {
@@ -4934,7 +4989,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 撤销上一步 ────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_undo_last',
     description: '撤销上一步可逆的 write（任务/商机/活动改期/事件更新/批量更新/…）。dry_run=true 时只预览不执行；list=true 时列出最近 10 条可撤销变更不执行。注意：只能撤销通过本插件工具做的 write，create/unlink 不在此范围。',
     schema: {
@@ -5011,7 +5066,7 @@ function registerTools(api: OpenClawPluginApi) {
   // ══════════════════════════════════════════════════════
 
   // ── Chatter 沟通 ──────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_message_post',
     description: '在任意 mail.thread 记录（任务/商机/工单/订单/客户等）的 chatter 发评论。会触发邮件通知所有关注者。body 支持 markdown 或 HTML。用于"给客户在商机下留个进度说明"、"在工单里回客户一句"。内部记录（不发邮件）请用 odoo_message_log。',
     schema: {
@@ -5045,7 +5100,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_message_log',
     description: '在记录 chatter 留内部记录（log note，不发邮件）。用于"给这条记录加个备注"、"记录一下今天的沟通要点"。与 odoo_message_post 的区别：log 不通知 followers。',
     schema: {
@@ -5077,7 +5132,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_message_history',
     description: '读取某条记录的 chatter 沟通历史（最新在前）。用于"这个商机跟进过什么"、"看看工单 #X 有哪些往来"。默认过滤掉系统通知。',
     schema: {
@@ -5114,7 +5169,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 项目 ──────────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_project_create',
     description: '创建新项目。用于"开个新项目叫 XX"、"给客户 Y 建个实施项目"。privacy_visibility 决定可见范围：followers=仅关注者/employees=全体员工（默认）/portal=门户用户。',
     schema: {
@@ -5143,7 +5198,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_project_update',
     description: '更新项目字段：名称/负责人/起止日期/描述/归档等。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5191,7 +5246,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 里程碑 ────────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_milestone_create',
     description: '为项目新建里程碑。用于"给项目 X 加一个 9 月底的交付里程碑"。',
     schema: {
@@ -5213,7 +5268,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_milestone_done',
     description: '把里程碑标记为完成（写 is_reached=true + reached_date=today）。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5238,7 +5293,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 任务指派 ──────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_task_assign',
     description: '指派一条或多条任务给一个/一批人（整份替换 user_ids）。用于"把这批任务都交给张三"、"加上李四一起做"。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5268,7 +5323,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 工单闭环 ──────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_ticket_update',
     description: '更新工单字段：名称/阶段/优先级/负责人/看板状态/截止。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5313,7 +5368,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_ticket_close',
     description: '关闭工单：把 stage_id 改到该团队 fold=true 的第一个阶段（= 关闭列）。如果找不到关闭阶段会报错让用户先建一个。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5349,7 +5404,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_ticket_assign',
     description: '指派工单给某位工程师。支持 odoo_undo_last 撤销。',
     schema: {
@@ -5377,7 +5432,7 @@ function registerTools(api: OpenClawPluginApi) {
   });
 
   // ── 审批动作 ──────────────────────────────────────────
-  api.registerTool({
+  register({
     name: 'odoo_approval_approve',
     description: '作为审批人批准一条审批请求（调 approval.request.action_approve）。用于"批了这条请假/采购申请"。注意：只能操作你本人是审批人的请求。',
     schema: {
@@ -5395,7 +5450,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_approval_refuse',
     description: '作为审批人拒绝审批请求（调 approval.request.action_refuse）。用于"驳回这条申请"。',
     schema: {
@@ -5415,7 +5470,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // v1.19.0 ⭐ 按需查工具（替代 system context 中的 7900 字工具表注入）
   // 不依赖 client 连接 — 即使 odoo 未连接，LLM 也能查工具表得知能做什么
-  api.registerTool({
+  register({
     name: 'odoo_help',
     description: '按需查看辉火云企业套件全部 189 个工具的分类速查、自然语言映射表和数据模型清单。无参数 = 返回完整表（约 7900 字 / 2000 tokens）；传 keyword = 模糊匹配工具名/中文意图（如 "请假"/"task"/"CRM"/"知识库"）。LLM 不知道某个意图对应哪个工具时调此工具按需获取详细信息，避免每次 prompt 都注入完整工具表。',
     schema: {
@@ -5454,7 +5509,13 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 190 个工具已注册（v1.19 — 加 odoo_help 按需查工具表，system context 不再每次注入 ~7900 字 / ~2000 tokens；含 v1.18 Studio 元编程+审计+多公司+通用报表+外部集成）');
+  if (tier === 'extended') {
+    api.logger.info(`[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=extended 全量；含 v1.19 odoo_help、v1.18 Studio 元编程+审计+多公司+通用报表+外部集成）`);
+  } else {
+    api.logger.info(
+      `[odoo] ${registeredCount} 个工具已注册（v1.20 — tier=${tier} 精简档位 / 跳过 ${skippedCount} 个不在 ${tier} 集合内的工具，节省 ~${Math.round(skippedCount * 80)} tokens schema）。完整 190 工具调 odoo_help 查；改 ~/.openclaw/openclaw.json 的 plugins.entries.odoo.config.tier="extended" 可恢复全量。`
+    );
+  }
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -5532,8 +5593,8 @@ function registerHooks(api: OpenClawPluginApi) {
 - 检索：odoo_search / odoo_daily_briefing
 - 状态：odoo_whoami / odoo_disconnect
 
-> **完整 189 个工具表 + 130+ 自然语言映射**（v1.18 含 HR / 库存 / 生产 / Studio 元编程 / 审计等深度场景）：调 \`odoo_help\`（无参 = 完整表；可传 keyword="请假"/"task"/"CRM"/"知识库" 等模糊匹配）按需获取。\
-v1.19 起此处不再注入完整工具表，节省每次 prompt ~2000 tokens。
+> **当前 tier=core（默认 30 个高频工具直接可见）。完整 190 个工具**（v1.18 含 HR / 库存 / 生产 / Studio 元编程 / 审计等深度场景）：调 \`odoo_help\`（无参 = 完整表；可传 keyword="请假"/"task"/"CRM"/"知识库" 等模糊匹配）按需获取。
+> v1.20 起每次 prompt 节省 ~2000 字 system context + ~14000 tokens 工具 schema = **~16000 tokens 总省**。如需恢复 v1.18 全量行为：改 \`~/.openclaw/openclaw.json\` 的 \`plugins.entries.odoo.config.tier="extended"\`。
 
 ### 日期 & 字段规范
 
