@@ -47,6 +47,263 @@ const prefsManager = new PrefsManager();
 const envelopeCache = new EnvelopeCache();
 let replyUnsubscribe: (() => void) | null = null;
 
+// v1.19.0 ⭐ 完整工具速查 + 自然语言映射（按需通过 odoo_help 工具拉取，不再注入 system context）
+// 之前 v1.18 这段会被 before_prompt_build hook 每次 LLM call 都注入到 prompt（~7900 字 / ~2000 tokens），
+// 即使用户只是闲聊也注入，导致 TTFT（Time To First Token）严重拉高。
+// v1.19 起改为按需调用：system context 只保留 6-8 个高频工具速查；LLM 需要扩展查找时调 odoo_help。
+const ODOO_HELP_TEXT = `### 工具速查（共 189 个）
+
+**基础**：odoo_connect · odoo_status · odoo_disconnect · odoo_whoami
+**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages · odoo_task_assign
+**活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_complete_activity · odoo_reschedule_activity
+**日历**：odoo_create_event · odoo_calendar_today · odoo_update_event · odoo_cancel_event
+**消息**：odoo_get_messages · odoo_send_message · odoo_message_post · odoo_message_log · odoo_message_history
+**邮件**：odoo_send_email · odoo_email_templates · odoo_email_from_template
+**附件**：odoo_attach_file · odoo_list_attachments · odoo_document_upload
+**关注者**：odoo_follow · odoo_unfollow
+**搜索**：odoo_search
+**CRM**：odoo_crm_pipeline · odoo_crm_create · odoo_crm_update · odoo_crm_won · odoo_crm_lost
+**项目**：odoo_project_overview · odoo_timesheet_log · odoo_project_create · odoo_project_update · odoo_milestone_create · odoo_milestone_done
+**销售**：odoo_sale_orders · odoo_purchase_orders
+**客服**：odoo_tickets · odoo_ticket_create · odoo_ticket_update · odoo_ticket_close · odoo_ticket_assign
+**财务**：odoo_invoices
+**联系人**：odoo_contacts · odoo_contact_create
+**库存**：odoo_stock_levels · odoo_stock_pickings
+**HR 基础**：odoo_employees · odoo_leaves · odoo_attendances
+**HR 请假闭环（v1.11）**：odoo_leave_types · odoo_leave_create · odoo_leave_approve · odoo_leave_refuse · odoo_leave_allocate
+**HR 报销闭环（v1.11）**：odoo_expenses · odoo_expense_create · odoo_expense_submit · odoo_expense_approve
+**HR 招聘（v1.11+v1.12）**：odoo_applicants · odoo_applicant_move_stage · odoo_recruitment_stages · odoo_recruitment_refuse_reasons · odoo_recruitment_create_meeting
+**HR 考核/工资/排班（v1.11+v1.12）**：odoo_appraisals · odoo_appraisal_action · odoo_payslips · odoo_payslip_validate · odoo_payslip_paid · odoo_payslip_cancel · odoo_planning_shifts · odoo_planning_publish · odoo_planning_unpublish
+**HR 技能/远程/车队（v1.12）**：odoo_employee_skills · odoo_employee_skill_add · odoo_skills_catalog · odoo_homeworking_set · odoo_fleet_vehicles
+**HR 员工生命周期（v1.13）**：odoo_employee_create · odoo_employee_update · odoo_employee_archive · odoo_employee_unarchive
+**HR 仪表盘 / 组织架构（v1.13）**：odoo_hr_dashboard · odoo_employee_org_chart · odoo_employee_versions
+**HR 部门 / 岗位 / 工作地点（v1.13）**：odoo_departments · odoo_department_create · odoo_jobs · odoo_job_create · odoo_work_locations
+**HR 工时洞察（v1.13）**：odoo_timesheet_summary · odoo_timesheet_team
+**HR Analytics 进阶（v1.14）**：odoo_attendance_analytics · odoo_leave_analytics · odoo_turnover_metrics
+**HR 编排（v1.14）**：odoo_employee_onboarding · odoo_employee_offboarding · odoo_payslip_run_create
+**工时审批（v1.14）**：odoo_timesheet_validate · odoo_timesheet_invalidate
+**跨域仪表盘（v1.14）**：odoo_sales_dashboard · odoo_crm_pipeline_health · odoo_invoice_aging · odoo_helpdesk_dashboard · odoo_project_dashboard · odoo_my_workload
+**个人视图（v1.15）**：odoo_my_overdues · odoo_my_today · odoo_my_unread
+**CRM 智能助手（v1.15）**：odoo_crm_stale_leads · odoo_crm_next_action · odoo_sales_forecast
+**跨模块桥（v1.15）**：odoo_helpdesk_to_task · odoo_lead_to_project · odoo_invoice_send_reminder
+**库存深化（v1.15）**：odoo_stock_low_alerts · odoo_stock_by_location · odoo_stock_picking_validate · odoo_warehouse_dashboard
+**多公司（v1.15）**：odoo_companies
+**采购深化（v1.16）**：odoo_purchase_create · odoo_purchase_confirm · odoo_purchase_dashboard · odoo_vendor_bill_aging
+**生产 MRP（v1.16）**：odoo_mo_list · odoo_mo_confirm · odoo_bom_query
+**会计深化（v1.16）**：odoo_journal_entries · odoo_payment_register · odoo_chart_of_accounts
+**智能洞察（v1.16）**：odoo_anomaly_detect · odoo_kpi_summary
+**报表 / 数据导出（v1.16）**：odoo_pdf_report · odoo_export_csv
+**流程自动化（v1.17）**：odoo_automations · odoo_cron_jobs · odoo_automation_create
+**数据治理（v1.17）**：odoo_data_quality_partners · odoo_data_quality_products · odoo_data_quality_completeness · odoo_partners_merge
+**批量操作（v1.17）**：odoo_batch_email · odoo_batch_archive · odoo_batch_assign
+**集成 / 治理（v1.17）**：odoo_translate_record · odoo_custom_fields · odoo_user_create · odoo_user_groups
+**Studio 元编程（v1.18）**：odoo_model_list · odoo_model_fields · odoo_model_create · odoo_field_create
+**审计与变更追踪（v1.18）**：odoo_audit_log · odoo_login_history · odoo_field_history
+**多公司联动（v1.18）**：odoo_company_switch · odoo_consolidated_dashboard
+**通用报表（v1.18）**：odoo_pivot_data · odoo_email_log
+**外部集成（v1.18）**：odoo_webhook_create · odoo_record_share_url · odoo_mail_queue
+**审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
+**助手**：odoo_daily_briefing · odoo_help
+**通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
+**知识库**：odoo_knowledge_search · odoo_knowledge_read · odoo_knowledge_create · odoo_knowledge_update · odoo_knowledge_append · odoo_knowledge_tree · odoo_knowledge_favorite · odoo_knowledge_trash
+**批量/撤销**：odoo_bulk_update · odoo_undo_last
+
+### 自然语言 → 工具映射（直接调用，无需询问用户）
+
+| 用户说 | 调用工具 |
+|--------|---------|
+| 今天有什么工作 / 每日概况 | **odoo_daily_briefing** |
+| 帮我写个待办 / 创建任务 | **odoo_create_task** |
+| 今日截止任务 / 今天要做什么 | **odoo_list_tasks**(today_only=true) |
+| 把任务 #X 标记完成 | **odoo_update_task**(stage_id=已完成阶段ID) |
+| 提醒我… | **odoo_create_activity** |
+| 安排会议 / 约个时间 | **odoo_create_event** |
+| 查看商机 / 销售管道 | **odoo_crm_pipeline** |
+| 新建商机 | **odoo_crm_create** |
+| 这个商机赢了 / 标记赢单 | **odoo_crm_won** |
+| 商机丢了 / 标记输单 | **odoo_crm_lost** |
+| 项目进展 / 里程碑进度 | **odoo_project_overview** |
+| 记录工时 X 小时 | **odoo_timesheet_log** |
+| 查看工单 / 待处理问题 | **odoo_tickets** |
+| 新建工单 / 提交问题 | **odoo_ticket_create** |
+| 查发票 / 逾期应收 | **odoo_invoices**(overdue_only=true) |
+| 查销售订单 | **odoo_sale_orders** |
+| 查采购订单 | **odoo_purchase_orders** |
+| 查客户 / 找联系人 | **odoo_contacts** |
+| 添加新客户 | **odoo_contact_create** |
+| 查库存 / 产品还有多少 | **odoo_stock_levels** |
+| 调拨单 / 出入库 | **odoo_stock_pickings** |
+| 查员工 / 某部门有谁 | **odoo_employees** |
+| 请假记录 | **odoo_leaves** |
+| 考勤 / 打卡 | **odoo_attendances** |
+| 审批 / 待审批 | **odoo_approvals** |
+| 查看消息 / 邮件通知 | **odoo_get_messages** |
+| 查活动类型 | **odoo_activity_types** |
+| 通知推送状态 / 企微/钉钉连上没 | **odoo_notification_status** |
+| 测试一下通知推送 | **odoo_notification_test** |
+| 列出已接入的渠道 | **odoo_notification_channels** |
+| 关闭通知 / 别发待办了 / 夜里静音 / 只接收紧急 | **odoo_notification_prefs** |
+| 模拟一次企微/钉钉回复写回系统 | **odoo_notification_reply** |
+| 找一下关于 X 的知识库文章 / 搜知识库 | **odoo_knowledge_search** |
+| 把这篇文章读给我 / 文章 #X 写了什么 | **odoo_knowledge_read** |
+| 新建知识库文章 / 记一下这个到知识库 | **odoo_knowledge_create** |
+| 改一下这篇文章的标题/正文 | **odoo_knowledge_update** |
+| 追加到文章 X 末尾 / 往文章里补一段 | **odoo_knowledge_append** |
+| 知识库长啥样 / 工作区里都有哪些文章 | **odoo_knowledge_tree** |
+| 收藏这篇 / 取消收藏 | **odoo_knowledge_favorite** |
+| 把这篇文章扔进回收站 / 删除文章 | **odoo_knowledge_trash** |
+| 那个活动做完了 / 把提醒 #X 标记完成 | **odoo_complete_activity** |
+| 活动挪到明天 / 提醒改到下周 | **odoo_reschedule_activity** |
+| 我要关注这条任务/商机 / 加我进关注 | **odoo_follow** |
+| 取消关注 / 别再给我推这条的变化 | **odoo_unfollow** |
+| 今天有什么会 / 查今日日程 | **odoo_calendar_today** |
+| 会议改时间 / 会议挪到 X 点 / 换会议室 | **odoo_update_event** |
+| 取消这场会 / 把会议归档 | **odoo_cancel_event** |
+| 发封邮件给客户 / 给 X 写封邮件 | **odoo_send_email** |
+| 有哪些邮件模板 / 找商机相关的模板 | **odoo_email_templates** |
+| 用模板发 / 用报价单模板发给他 | **odoo_email_from_template** |
+| 把这份合同附到商机 / 上传附件 | **odoo_attach_file** |
+| 这个商机/工单有哪些附件 | **odoo_list_attachments** |
+| 上传到文档库 / 归档到文件夹 | **odoo_document_upload** |
+| 把这批任务都改成完成 / 批量改阶段 | **odoo_bulk_update** |
+| 撤销上一步 / 撤回刚才那个 / 改错了 | **odoo_undo_last** |
+| 给商机/工单/任务下面留个进度说明 / 在 chatter 回一句 | **odoo_message_post** |
+| 记一下备注 / 留个内部记录（不发邮件） | **odoo_message_log** |
+| 这个记录都聊过什么 / 看看跟进历史 | **odoo_message_history** |
+| 开个新项目 / 新建项目 | **odoo_project_create** |
+| 改项目的负责人/日期/描述 | **odoo_project_update** |
+| 给项目加个里程碑 / 新建里程碑 | **odoo_milestone_create** |
+| 里程碑达成了 / 标记完成 | **odoo_milestone_done** |
+| 把这批任务都交给张三 / 指派任务 | **odoo_task_assign** |
+| 改工单的阶段/优先级/负责人 | **odoo_ticket_update** |
+| 关闭工单 / 工单处理完了 | **odoo_ticket_close** |
+| 把工单派给 X | **odoo_ticket_assign** |
+| 批这条 / 审批通过 | **odoo_approval_approve** |
+| 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
+| 有哪些假可以请 / 请假类型 | **odoo_leave_types** |
+| 我请假 / 帮 X 请病假 / 请假明天 | **odoo_leave_create** |
+| 批了这条请假 / 准了某某的假 | **odoo_leave_approve** |
+| 不批这个请假 / 拒了请假 | **odoo_leave_refuse** |
+| 给某员工加假期 / 补调休额度 / 分配年假 | **odoo_leave_allocate** |
+| 我的报销 / 待批的报销 / 看报销列表 | **odoo_expenses** |
+| 我要报销 / 报销 X 元 / 报昨天的差旅 | **odoo_expense_create** |
+| 把这条报销提交 / 提交我的报销 | **odoo_expense_submit** |
+| 批了这条报销 / 拒绝报销 / 通过 X 的报销 | **odoo_expense_approve** |
+| 招聘 pipeline / 候选人列表 / 某岗位有谁 | **odoo_applicants** |
+| 把候选人推到面试 / 移动应聘者阶段 / 拒绝候选人 | **odoo_applicant_move_stage** |
+| 招聘有哪些阶段 / 列出招聘 stage | **odoo_recruitment_stages** |
+| 拒绝候选人有哪些理由 / 拒绝原因列表 | **odoo_recruitment_refuse_reasons** |
+| 约这位候选人面试 / 给应聘者排个面试 | **odoo_recruitment_create_meeting** |
+| 看考核 / 我要做的绩效 / 待评的人 | **odoo_appraisals** |
+| 启动 / 完成 / 退回考核 | **odoo_appraisal_action** |
+| 我的工资单 / 这个月工资 / 看薪资 | **odoo_payslips** |
+| 验证工资单 / 工资单 done | **odoo_payslip_validate** |
+| 工资发了 / 工资单标记已支付 | **odoo_payslip_paid** |
+| 取消工资单 / 作废 | **odoo_payslip_cancel** |
+| 我这周的班 / 排班 / 谁今天值班 | **odoo_planning_shifts** |
+| 发布排班 / 公布班次 / 通知员工值班 | **odoo_planning_publish** |
+| 撤销排班发布 / 班次回到草稿 | **odoo_planning_unpublish** |
+| 看某员工的技能 / 我会什么 / 部门技能盘点 | **odoo_employee_skills** |
+| 给员工加技能 / 录入技能等级 | **odoo_employee_skill_add** |
+| 系统里有哪些技能 / 技能等级目录 | **odoo_skills_catalog** |
+| 我明天远程 / 标记某天在家办公 / 周一在上海办公室 | **odoo_homeworking_set** |
+| 我有哪辆车 / 公司车队 / 销售部的车 | **odoo_fleet_vehicles** |
+| 入职新员工 / 录入张三 / 创建员工档案 | **odoo_employee_create** |
+| 改张三的部门 / 换上级 / 改员工资料 / 加手机号 | **odoo_employee_update** |
+| 离职 / 归档员工 / 停用 X | **odoo_employee_archive** |
+| 返聘 / 启用员工 / 重新激活账号 | **odoo_employee_unarchive** |
+| HR 仪表盘 / 人事概况 / 公司在编多少人 / 今天有谁请假 | **odoo_hr_dashboard** |
+| 看看张三上面是谁 / 我下面有几个人 / 组织架构 / 上下级 | **odoo_employee_org_chart** |
+| X 的合同历史 / 员工版本 / 调薪记录 | **odoo_employee_versions** |
+| 有哪些部门 / 部门列表 / 部门树 | **odoo_departments** |
+| 新建部门 / 加个部门 | **odoo_department_create** |
+| 有哪些岗位 / 岗位列表 / 在招岗位 | **odoo_jobs** |
+| 新开个岗位 / 创建职位 | **odoo_job_create** |
+| 有哪些工作地点 / 办公室 / 远程地点 | **odoo_work_locations** |
+| 我这个月工时 / 项目工时聚合 / 工时分布 | **odoo_timesheet_summary** |
+| 我下属的工时 / 团队工时 / 谁工时少 | **odoo_timesheet_team** |
+| 考勤分析 / 这个月谁工时最多 / 部门考勤分布 | **odoo_attendance_analytics** |
+| 请假趋势 / 这个月请假数据 / 全公司请假统计 | **odoo_leave_analytics** |
+| 入离职率 / 流失率 / 近 3 个月人员变动 | **odoo_turnover_metrics** |
+| 入职新员工带账号带欢迎 / 一键入职 / 录入员工并建账号 | **odoo_employee_onboarding** |
+| 一键离职 / 离职转移下属 / 离职流程 | **odoo_employee_offboarding** |
+| 验证工时 / 批准工时 / lock 工时 | **odoo_timesheet_validate** |
+| 撤销工时验证 / 解锁工时 | **odoo_timesheet_invalidate** |
+| 销售概况 / 本月销售额 / Top 客户 | **odoo_sales_dashboard** |
+| CRM 漏斗健康 / 商机分布 / 逾期商机 / 平均概率 | **odoo_crm_pipeline_health** |
+| 应收账龄 / 账龄分析 / 谁欠款最多 / 90 天以上 | **odoo_invoice_aging** |
+| 工单仪表盘 / 客服情况 / SLA 逾期 | **odoo_helpdesk_dashboard** |
+| 项目仪表盘 / 项目总览 / 任务总数 | **odoo_project_dashboard** |
+| 我手上还有多少活 / 我的工作负荷 / 我的待办全图 | **odoo_my_workload** |
+| 创建本月工资批次 / 批量生成工资单 | **odoo_payslip_run_create** |
+| 我有什么逾期的 / 我手上逾期项 / 哪些事过期了 | **odoo_my_overdues** |
+| 我今天要做什么 / 今天的全部事 | **odoo_my_today** |
+| 我有几条未读 / 未读消息 / @我的有没有看 | **odoo_my_unread** |
+| 哪些商机停滞了 / 长时间没动的商机 / stale leads | **odoo_crm_stale_leads** |
+| 这个商机下一步该做什么 / 给我建议 / 智能推荐 | **odoo_crm_next_action** |
+| 销售预测 / 加权管道 / 我们这个季度大概能做多少 | **odoo_sales_forecast** |
+| 把这个工单转任务 / 工单转项目 | **odoo_helpdesk_to_task** |
+| 商机赢单建项目 / 商机转项目 | **odoo_lead_to_project** |
+| 给客户发催款 / 发逾期提醒 | **odoo_invoice_send_reminder** |
+| 库存预警 / 哪些产品要补货 / 缺货预警 | **odoo_stock_low_alerts** |
+| 各个仓库库存 / 按库位看库存 | **odoo_stock_by_location** |
+| 验收这条调拨单 / 出库确认 | **odoo_stock_picking_validate** |
+| 仓库总览 / 待出库待入库 / 仓储情况 | **odoo_warehouse_dashboard** |
+| 我属于几家公司 / 公司列表 / 看公司 | **odoo_companies** |
+| 创建采购订单 / 下采购单 / 给某供应商下单 | **odoo_purchase_create** |
+| 确认采购订单 / 把这个 PO 下单 | **odoo_purchase_confirm** |
+| 采购仪表盘 / 本月采购 / 采购总览 | **odoo_purchase_dashboard** |
+| 应付账龄 / 我们欠供应商多少 / 老的未付账单 | **odoo_vendor_bill_aging** |
+| 生产订单 / MO 列表 / 在制单 | **odoo_mo_list** |
+| 确认生产订单 / 把 MO 启动 | **odoo_mo_confirm** |
+| 查 BOM / 物料清单 / 这个产品由什么组成 | **odoo_bom_query** |
+| 看会计凭证 / 凭证列表 / journal 分录 | **odoo_journal_entries** |
+| 登记付款 / 收款 / 给这张发票登记入账 | **odoo_payment_register** |
+| 科目表 / 会计科目 / 看 chart of accounts | **odoo_chart_of_accounts** |
+| 异常检测 / 系统有什么不对 / 全局健康检查 | **odoo_anomaly_detect** |
+| 老板 KPI / 一句话给我看 KPI / 公司核心指标 | **odoo_kpi_summary** |
+| 给我导这个 PO 的 PDF / 生成报表 PDF / 打印发票 | **odoo_pdf_report** |
+| 导出 CSV / 把数据导出来 / 给我生成表格 | **odoo_export_csv** |
+| 看自动化规则 / 系统里的 base.automation | **odoo_automations** |
+| 看计划任务 / 看 cron / 哪些任务在跑 | **odoo_cron_jobs** |
+| 创建自动化规则 / 加 trigger / 自动跑 | **odoo_automation_create** |
+| 重复客户 / 查重 / 联系人查重 | **odoo_data_quality_partners** |
+| 重复产品 / 重复 SKU | **odoo_data_quality_products** |
+| 数据完整性 / 缺字段 / 资料完整度 | **odoo_data_quality_completeness** |
+| 合并客户 / 合并联系人 / 把这两个 partner 合一起 | **odoo_partners_merge** |
+| 批量发邮件 / 给一批客户发模板邮件 | **odoo_batch_email** |
+| 批量归档 / 批量停用 / 批量激活 | **odoo_batch_archive** |
+| 批量改经办人 / 批量重新分配 | **odoo_batch_assign** |
+| 翻译这个字段 / 多语言 / 改成英文版 | **odoo_translate_record** |
+| 自定义字段 / x_ 开头的 / Studio 字段 | **odoo_custom_fields** |
+| 创建系统用户 / 给这个员工建账号 | **odoo_user_create** |
+| 看用户权限 / 我有哪些组 / 用户组 | **odoo_user_groups** |
+| 系统里有哪些模型 / 列模型 / Studio 模型 | **odoo_model_list** |
+| 看某模型的字段 / 这模型有哪些字段 | **odoo_model_fields** |
+| 创建自定义模型 / 加新表 / Studio 新建模型 | **odoo_model_create** |
+| 加自定义字段 / 给模型加字段 | **odoo_field_create** |
+| 这条记录改过什么 / 看变更历史 / 审计日志 | **odoo_audit_log** |
+| 谁登录过 / 登录记录 / login history | **odoo_login_history** |
+| 这字段改过几次 / 字段变更历史 | **odoo_field_history** |
+| 切换公司 / 切到 X 公司 / 改公司 | **odoo_company_switch** |
+| 集团合并报表 / 跨公司汇总 / 多公司视图 | **odoo_consolidated_dashboard** |
+| 数据透视 / pivot / 按维度聚合 | **odoo_pivot_data** |
+| 邮件日志 / 看邮件发送 / 邮件失败 | **odoo_email_log** |
+| 配 webhook / 出站 webhook / 创建 webhook | **odoo_webhook_create** |
+| 把这条记录链接发我 / 分享给客户 / portal 链接 | **odoo_record_share_url** |
+| 邮件队列 / 邮件为啥没发 / mail queue 健康 | **odoo_mail_queue** |
+| 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
+| 断开连接 / 退出系统 | **odoo_disconnect** |
+
+### 常用数据模型（技术内部标识，不在正文中朗读）
+
+project.task · project.project · project.milestone · mail.activity · calendar.event ·
+crm.lead · crm.stage · sale.order · purchase.order · helpdesk.ticket · account.move ·
+res.partner · hr.employee · hr.leave · hr.attendance · stock.quant · stock.picking ·
+account.analytic.line · approval.request · planning.slot · knowledge.article ·
+mail.template · mail.mail · mail.followers · ir.attachment · documents.document
+`;
+
 export default definePluginEntry({
   id: 'odoo',
   name: '火一五·辉火云企业套件插件',
@@ -5156,7 +5413,48 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.logger.info('[odoo] 189 个工具已注册（v1.18 — Studio 元编程+审计+多公司+通用报表+外部集成：ir.model/ir.model.fields 创建 + mail.tracking.value 变更追踪 + company_switch + pivot_data + webhook 创建 + portal 分享 + 邮件队列健康）');
+  // v1.19.0 ⭐ 按需查工具（替代 system context 中的 7900 字工具表注入）
+  // 不依赖 client 连接 — 即使 odoo 未连接，LLM 也能查工具表得知能做什么
+  api.registerTool({
+    name: 'odoo_help',
+    description: '按需查看辉火云企业套件全部 189 个工具的分类速查、自然语言映射表和数据模型清单。无参数 = 返回完整表（约 7900 字 / 2000 tokens）；传 keyword = 模糊匹配工具名/中文意图（如 "请假"/"task"/"CRM"/"知识库"）。LLM 不知道某个意图对应哪个工具时调此工具按需获取详细信息，避免每次 prompt 都注入完整工具表。',
+    schema: {
+      type: 'object',
+      properties: {
+        keyword: {
+          type: 'string',
+          description: '可选。模糊匹配工具名或中文意图（不区分大小写，按行匹配）。例如 "请假" 返回所有请假相关工具行；"CRM" 返回 CRM 分类。不传则返回完整工具表。',
+        },
+      },
+    },
+    async handler(params: { keyword?: string }) {
+      const kw = params.keyword?.trim();
+      if (!kw) {
+        return {
+          success: true,
+          content: ODOO_HELP_TEXT,
+          hint: '完整工具表已返回。下次可传 keyword 缩小范围（如 keyword="请假" 仅返回请假相关行）。',
+        };
+      }
+      const lowerKw = kw.toLowerCase();
+      const lines = ODOO_HELP_TEXT.split('\n');
+      const matched = lines.filter(line => line.toLowerCase().includes(lowerKw));
+      if (matched.length === 0) {
+        return {
+          success: false,
+          message: `没有匹配 "${kw}" 的工具。试试调 odoo_help（不传 keyword）查看完整表，或换个关键词（如 "task"/"CRM"/"知识库"/"HR"）。`,
+        };
+      }
+      return {
+        success: true,
+        keyword: kw,
+        matchedLines: matched.length,
+        content: matched.join('\n'),
+      };
+    },
+  });
+
+  api.logger.info('[odoo] 190 个工具已注册（v1.19 — 加 odoo_help 按需查工具表，system context 不再每次注入 ~7900 字 / ~2000 tokens；含 v1.18 Studio 元编程+审计+多公司+通用报表+外部集成）');
 }
 
 // ── 注册 before_prompt_build 钩子 ─────────────────────────────────────────────
@@ -5213,284 +5511,46 @@ function registerHooks(api: OpenClawPluginApi) {
       appendSystemContext: `
 ## 辉火云企业套件 已连接
 
-> **品牌口径（硬规则）**：对外沟通时一律称"辉火云企业套件"或"辉火云"。
-> 不得出现"Odoo"、"欧度"或任何第三方 ERP 商标。工具名（odoo_*）和技术模型名
-> （如 project.task）仅在调试说明里出现，面向用户的正文请用中文业务术语
-> （"任务"/"商机"/"工单"/"内部动态"而非"chatter"等）。
+> **品牌口径**：对外称"辉火云企业套件"或"辉火云"，禁出现"Odoo"等第三方 ERP 商标。技术标识符（odoo_*、project.task）仅在调试里出现，面向用户的正文用中文业务术语（"任务"/"商机"/"工单"/"内部动态"）。
 
-> **共享凭据规则（v1.10）**：当前会话用的凭据是【${credSourceLabel}】。
-> 如果是【组织共享凭据】，意味着任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人都
-> 自动用这套，**绝对不要在群里再向用户询问 URL/用户名/密码**。
-> 如果用户主动要换凭据，告诉他们调用 odoo_connect（默认仍是共享，private=true 则只覆盖自己）。
-> 如果用户疑惑"为什么没问我密码"，调用 odoo_whoami 给他看清当前来源。
+> **共享凭据规则（v1.10）**：当前凭据来源【${credSourceLabel}】。
+> 共享凭据 = 全员复用，任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人都用这套，**绝对不要再问 URL/用户名/密码**。
+> 用户要换凭据时调 odoo_connect（默认 private=false 共享）；用户问"为什么没问密码"时调 odoo_whoami。
 
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **凭据来源：** ${credSourceLabel}
 **今日：** ${todayStr} | **明日：** ${tomorrowStr}
 
-### 工具速查（共 77 个）
+### 高频工具（直接调用，识别意图后即用）
 
-**基础**：odoo_connect · odoo_status · odoo_disconnect · odoo_whoami
-**任务**：odoo_create_task · odoo_list_tasks · odoo_update_task · odoo_get_task_stages · odoo_task_assign
-**活动**：odoo_create_activity · odoo_list_activities · odoo_activity_types · odoo_complete_activity · odoo_reschedule_activity
-**日历**：odoo_create_event · odoo_calendar_today · odoo_update_event · odoo_cancel_event
-**消息**：odoo_get_messages · odoo_send_message · odoo_message_post · odoo_message_log · odoo_message_history
-**邮件**：odoo_send_email · odoo_email_templates · odoo_email_from_template
-**附件**：odoo_attach_file · odoo_list_attachments · odoo_document_upload
-**关注者**：odoo_follow · odoo_unfollow
-**搜索**：odoo_search
-**CRM** ：odoo_crm_pipeline · odoo_crm_create · odoo_crm_update · odoo_crm_won · odoo_crm_lost
-**项目**：odoo_project_overview · odoo_timesheet_log · odoo_project_create · odoo_project_update · odoo_milestone_create · odoo_milestone_done
-**销售**：odoo_sale_orders · odoo_purchase_orders
-**客服**：odoo_tickets · odoo_ticket_create · odoo_ticket_update · odoo_ticket_close · odoo_ticket_assign
-**财务**：odoo_invoices
-**联系人**：odoo_contacts · odoo_contact_create
-**库存**：odoo_stock_levels · odoo_stock_pickings
-**HR 基础** ：odoo_employees · odoo_leaves · odoo_attendances
-**HR 请假闭环（v1.11）**：odoo_leave_types · odoo_leave_create · odoo_leave_approve · odoo_leave_refuse · odoo_leave_allocate
-**HR 报销闭环（v1.11）**：odoo_expenses · odoo_expense_create · odoo_expense_submit · odoo_expense_approve
-**HR 招聘（v1.11+v1.12）**：odoo_applicants · odoo_applicant_move_stage · odoo_recruitment_stages · odoo_recruitment_refuse_reasons · odoo_recruitment_create_meeting
-**HR 考核/工资/排班（v1.11+v1.12）**：odoo_appraisals · odoo_appraisal_action · odoo_payslips · odoo_payslip_validate · odoo_payslip_paid · odoo_payslip_cancel · odoo_planning_shifts · odoo_planning_publish · odoo_planning_unpublish
-**HR 技能/远程/车队（v1.12）**：odoo_employee_skills · odoo_employee_skill_add · odoo_skills_catalog · odoo_homeworking_set · odoo_fleet_vehicles
-**HR 员工生命周期（v1.13）**：odoo_employee_create · odoo_employee_update · odoo_employee_archive · odoo_employee_unarchive
-**HR 仪表盘 / 组织架构（v1.13）**：odoo_hr_dashboard · odoo_employee_org_chart · odoo_employee_versions
-**HR 部门 / 岗位 / 工作地点（v1.13）**：odoo_departments · odoo_department_create · odoo_jobs · odoo_job_create · odoo_work_locations
-**HR 工时洞察（v1.13）**：odoo_timesheet_summary · odoo_timesheet_team
-**HR Analytics 进阶（v1.14）**：odoo_attendance_analytics · odoo_leave_analytics · odoo_turnover_metrics
-**HR 编排（v1.14）**：odoo_employee_onboarding · odoo_employee_offboarding · odoo_payslip_run_create
-**工时审批（v1.14）**：odoo_timesheet_validate · odoo_timesheet_invalidate
-**跨域仪表盘（v1.14）**：odoo_sales_dashboard · odoo_crm_pipeline_health · odoo_invoice_aging · odoo_helpdesk_dashboard · odoo_project_dashboard · odoo_my_workload
-**个人视图（v1.15）**：odoo_my_overdues · odoo_my_today · odoo_my_unread
-**CRM 智能助手（v1.15）**：odoo_crm_stale_leads · odoo_crm_next_action · odoo_sales_forecast
-**跨模块桥（v1.15）**：odoo_helpdesk_to_task · odoo_lead_to_project · odoo_invoice_send_reminder
-**库存深化（v1.15）**：odoo_stock_low_alerts · odoo_stock_by_location · odoo_stock_picking_validate · odoo_warehouse_dashboard
-**多公司（v1.15）**：odoo_companies
-**采购深化（v1.16）**：odoo_purchase_create · odoo_purchase_confirm · odoo_purchase_dashboard · odoo_vendor_bill_aging
-**生产 MRP（v1.16）**：odoo_mo_list · odoo_mo_confirm · odoo_bom_query
-**会计深化（v1.16）**：odoo_journal_entries · odoo_payment_register · odoo_chart_of_accounts
-**智能洞察（v1.16）**：odoo_anomaly_detect · odoo_kpi_summary
-**报表 / 数据导出（v1.16）**：odoo_pdf_report · odoo_export_csv
-**流程自动化（v1.17）**：odoo_automations · odoo_cron_jobs · odoo_automation_create
-**数据治理（v1.17）**：odoo_data_quality_partners · odoo_data_quality_products · odoo_data_quality_completeness · odoo_partners_merge
-**批量操作（v1.17）**：odoo_batch_email · odoo_batch_archive · odoo_batch_assign
-**集成 / 治理（v1.17）**：odoo_translate_record · odoo_custom_fields · odoo_user_create · odoo_user_groups
-**Studio 元编程（v1.18）**：odoo_model_list · odoo_model_fields · odoo_model_create · odoo_field_create
-**审计与变更追踪（v1.18）**：odoo_audit_log · odoo_login_history · odoo_field_history
-**多公司联动（v1.18）**：odoo_company_switch · odoo_consolidated_dashboard
-**通用报表（v1.18）**：odoo_pivot_data · odoo_email_log
-**外部集成（v1.18）**：odoo_webhook_create · odoo_record_share_url · odoo_mail_queue
-**审批**：odoo_approvals · odoo_approval_approve · odoo_approval_refuse
-**助手**：odoo_daily_briefing
-**通知基座**：odoo_notification_status · odoo_notification_channels · odoo_notification_test · odoo_notification_prefs · odoo_notification_reply
-**知识库**：odoo_knowledge_search · odoo_knowledge_read · odoo_knowledge_create · odoo_knowledge_update · odoo_knowledge_append · odoo_knowledge_tree · odoo_knowledge_favorite · odoo_knowledge_trash
-**批量/撤销**：odoo_bulk_update · odoo_undo_last
+- 任务/活动：odoo_create_task / odoo_list_tasks / odoo_my_today / odoo_my_workload / odoo_create_activity / odoo_calendar_today
+- CRM：odoo_crm_pipeline / odoo_crm_create / odoo_crm_won / odoo_crm_lost
+- 项目：odoo_project_overview / odoo_timesheet_log
+- 客服：odoo_tickets / odoo_ticket_create
+- 财务：odoo_invoices / odoo_sale_orders / odoo_purchase_orders
+- 联系人：odoo_contacts / odoo_contact_create
+- 检索：odoo_search / odoo_daily_briefing
+- 状态：odoo_whoami / odoo_disconnect
 
-### 自然语言 → 工具映射（直接调用，无需询问）
-
-| 用户说 | 调用工具 |
-|--------|---------|
-| 今天有什么工作 / 每日概况 | **odoo_daily_briefing** |
-| 帮我写个待办 / 创建任务 | **odoo_create_task** |
-| 今日截止任务 / 今天要做什么 | **odoo_list_tasks**(today_only=true) |
-| 把任务 #X 标记完成 | **odoo_update_task**(stage_id=已完成阶段ID) |
-| 提醒我… | **odoo_create_activity** |
-| 安排会议 / 约个时间 | **odoo_create_event** |
-| 查看商机 / 销售管道 | **odoo_crm_pipeline** |
-| 新建商机 | **odoo_crm_create** |
-| 这个商机赢了 / 标记赢单 | **odoo_crm_won** |
-| 商机丢了 / 标记输单 | **odoo_crm_lost** |
-| 项目进展 / 里程碑进度 | **odoo_project_overview** |
-| 记录工时 X 小时 | **odoo_timesheet_log** |
-| 查看工单 / 待处理问题 | **odoo_tickets** |
-| 新建工单 / 提交问题 | **odoo_ticket_create** |
-| 查发票 / 逾期应收 | **odoo_invoices**(overdue_only=true) |
-| 查销售订单 | **odoo_sale_orders** |
-| 查采购订单 | **odoo_purchase_orders** |
-| 查客户 / 找联系人 | **odoo_contacts** |
-| 添加新客户 | **odoo_contact_create** |
-| 查库存 / 产品还有多少 | **odoo_stock_levels** |
-| 调拨单 / 出入库 | **odoo_stock_pickings** |
-| 查员工 / 某部门有谁 | **odoo_employees** |
-| 请假记录 | **odoo_leaves** |
-| 考勤 / 打卡 | **odoo_attendances** |
-| 审批 / 待审批 | **odoo_approvals** |
-| 查看消息 / 邮件通知 | **odoo_get_messages** |
-| 查活动类型 | **odoo_activity_types** |
-| 通知推送状态 / 企微/钉钉连上没 | **odoo_notification_status** |
-| 测试一下通知推送 | **odoo_notification_test** |
-| 列出已接入的渠道 | **odoo_notification_channels** |
-| 关闭通知 / 别发待办了 / 夜里静音 / 只接收紧急 | **odoo_notification_prefs** |
-| 模拟一次企微/钉钉回复写回系统 | **odoo_notification_reply** |
-| 找一下关于 X 的知识库文章 / 搜知识库 | **odoo_knowledge_search** |
-| 把这篇文章读给我 / 文章 #X 写了什么 | **odoo_knowledge_read** |
-| 新建知识库文章 / 记一下这个到知识库 | **odoo_knowledge_create** |
-| 改一下这篇文章的标题/正文 | **odoo_knowledge_update** |
-| 追加到文章 X 末尾 / 往文章里补一段 | **odoo_knowledge_append** |
-| 知识库长啥样 / 工作区里都有哪些文章 | **odoo_knowledge_tree** |
-| 收藏这篇 / 取消收藏 | **odoo_knowledge_favorite** |
-| 把这篇文章扔进回收站 / 删除文章 | **odoo_knowledge_trash** |
-| 那个活动做完了 / 把提醒 #X 标记完成 | **odoo_complete_activity** |
-| 活动挪到明天 / 提醒改到下周 | **odoo_reschedule_activity** |
-| 我要关注这条任务/商机 / 加我进关注 | **odoo_follow** |
-| 取消关注 / 别再给我推这条的变化 | **odoo_unfollow** |
-| 今天有什么会 / 查今日日程 | **odoo_calendar_today** |
-| 会议改时间 / 会议挪到 X 点 / 换会议室 | **odoo_update_event** |
-| 取消这场会 / 把会议归档 | **odoo_cancel_event** |
-| 发封邮件给客户 / 给 X 写封邮件 | **odoo_send_email** |
-| 有哪些邮件模板 / 找商机相关的模板 | **odoo_email_templates** |
-| 用模板发 / 用报价单模板发给他 | **odoo_email_from_template** |
-| 把这份合同附到商机 / 上传附件 | **odoo_attach_file** |
-| 这个商机/工单有哪些附件 | **odoo_list_attachments** |
-| 上传到文档库 / 归档到文件夹 | **odoo_document_upload** |
-| 把这批任务都改成完成 / 批量改阶段 | **odoo_bulk_update** |
-| 撤销上一步 / 撤回刚才那个 / 改错了 | **odoo_undo_last** |
-| 给商机/工单/任务下面留个进度说明 / 在 chatter 回一句 | **odoo_message_post** |
-| 记一下备注 / 留个内部记录（不发邮件） | **odoo_message_log** |
-| 这个记录都聊过什么 / 看看跟进历史 | **odoo_message_history** |
-| 开个新项目 / 新建项目 | **odoo_project_create** |
-| 改项目的负责人/日期/描述 | **odoo_project_update** |
-| 给项目加个里程碑 / 新建里程碑 | **odoo_milestone_create** |
-| 里程碑达成了 / 标记完成 | **odoo_milestone_done** |
-| 把这批任务都交给张三 / 指派任务 | **odoo_task_assign** |
-| 改工单的阶段/优先级/负责人 | **odoo_ticket_update** |
-| 关闭工单 / 工单处理完了 | **odoo_ticket_close** |
-| 把工单派给 X | **odoo_ticket_assign** |
-| 批这条 / 审批通过 | **odoo_approval_approve** |
-| 驳回 / 拒绝这条申请 | **odoo_approval_refuse** |
-| 有哪些假可以请 / 请假类型 | **odoo_leave_types** |
-| 我请假 / 帮 X 请病假 / 请假明天 | **odoo_leave_create** |
-| 批了这条请假 / 准了某某的假 | **odoo_leave_approve** |
-| 不批这个请假 / 拒了请假 | **odoo_leave_refuse** |
-| 给某员工加假期 / 补调休额度 / 分配年假 | **odoo_leave_allocate** |
-| 我的报销 / 待批的报销 / 看报销列表 | **odoo_expenses** |
-| 我要报销 / 报销 X 元 / 报昨天的差旅 | **odoo_expense_create** |
-| 把这条报销提交 / 提交我的报销 | **odoo_expense_submit** |
-| 批了这条报销 / 拒绝报销 / 通过 X 的报销 | **odoo_expense_approve** |
-| 招聘 pipeline / 候选人列表 / 某岗位有谁 | **odoo_applicants** |
-| 把候选人推到面试 / 移动应聘者阶段 / 拒绝候选人 | **odoo_applicant_move_stage** |
-| 招聘有哪些阶段 / 列出招聘 stage | **odoo_recruitment_stages** |
-| 拒绝候选人有哪些理由 / 拒绝原因列表 | **odoo_recruitment_refuse_reasons** |
-| 约这位候选人面试 / 给应聘者排个面试 | **odoo_recruitment_create_meeting** |
-| 看考核 / 我要做的绩效 / 待评的人 | **odoo_appraisals** |
-| 启动 / 完成 / 退回考核 | **odoo_appraisal_action** |
-| 我的工资单 / 这个月工资 / 看薪资 | **odoo_payslips** |
-| 验证工资单 / 工资单 done | **odoo_payslip_validate** |
-| 工资发了 / 工资单标记已支付 | **odoo_payslip_paid** |
-| 取消工资单 / 作废 | **odoo_payslip_cancel** |
-| 我这周的班 / 排班 / 谁今天值班 | **odoo_planning_shifts** |
-| 发布排班 / 公布班次 / 通知员工值班 | **odoo_planning_publish** |
-| 撤销排班发布 / 班次回到草稿 | **odoo_planning_unpublish** |
-| 看某员工的技能 / 我会什么 / 部门技能盘点 | **odoo_employee_skills** |
-| 给员工加技能 / 录入技能等级 | **odoo_employee_skill_add** |
-| 系统里有哪些技能 / 技能等级目录 | **odoo_skills_catalog** |
-| 我明天远程 / 标记某天在家办公 / 周一在上海办公室 | **odoo_homeworking_set** |
-| 我有哪辆车 / 公司车队 / 销售部的车 | **odoo_fleet_vehicles** |
-| 入职新员工 / 录入张三 / 创建员工档案 | **odoo_employee_create** |
-| 改张三的部门 / 换上级 / 改员工资料 / 加手机号 | **odoo_employee_update** |
-| 离职 / 归档员工 / 停用 X | **odoo_employee_archive** |
-| 返聘 / 启用员工 / 重新激活账号 | **odoo_employee_unarchive** |
-| HR 仪表盘 / 人事概况 / 公司在编多少人 / 今天有谁请假 | **odoo_hr_dashboard** |
-| 看看张三上面是谁 / 我下面有几个人 / 组织架构 / 上下级 | **odoo_employee_org_chart** |
-| X 的合同历史 / 员工版本 / 调薪记录 | **odoo_employee_versions** |
-| 有哪些部门 / 部门列表 / 部门树 | **odoo_departments** |
-| 新建部门 / 加个部门 | **odoo_department_create** |
-| 有哪些岗位 / 岗位列表 / 在招岗位 | **odoo_jobs** |
-| 新开个岗位 / 创建职位 | **odoo_job_create** |
-| 有哪些工作地点 / 办公室 / 远程地点 | **odoo_work_locations** |
-| 我这个月工时 / 项目工时聚合 / 工时分布 | **odoo_timesheet_summary** |
-| 我下属的工时 / 团队工时 / 谁工时少 | **odoo_timesheet_team** |
-| 考勤分析 / 这个月谁工时最多 / 部门考勤分布 | **odoo_attendance_analytics** |
-| 请假趋势 / 这个月请假数据 / 全公司请假统计 | **odoo_leave_analytics** |
-| 入离职率 / 流失率 / 近 3 个月人员变动 | **odoo_turnover_metrics** |
-| 入职新员工带账号带欢迎 / 一键入职 / 录入员工并建账号 | **odoo_employee_onboarding** |
-| 一键离职 / 离职转移下属 / 离职流程 | **odoo_employee_offboarding** |
-| 验证工时 / 批准工时 / lock 工时 | **odoo_timesheet_validate** |
-| 撤销工时验证 / 解锁工时 | **odoo_timesheet_invalidate** |
-| 销售概况 / 本月销售额 / Top 客户 | **odoo_sales_dashboard** |
-| CRM 漏斗健康 / 商机分布 / 逾期商机 / 平均概率 | **odoo_crm_pipeline_health** |
-| 应收账龄 / 账龄分析 / 谁欠款最多 / 90 天以上 | **odoo_invoice_aging** |
-| 工单仪表盘 / 客服情况 / SLA 逾期 | **odoo_helpdesk_dashboard** |
-| 项目仪表盘 / 项目总览 / 任务总数 | **odoo_project_dashboard** |
-| 我手上还有多少活 / 我的工作负荷 / 我的待办全图 | **odoo_my_workload** |
-| 创建本月工资批次 / 批量生成工资单 | **odoo_payslip_run_create** |
-| 我有什么逾期的 / 我手上逾期项 / 哪些事过期了 | **odoo_my_overdues** |
-| 我今天要做什么 / 今天的全部事 | **odoo_my_today** |
-| 我有几条未读 / 未读消息 / @我的有没有看 | **odoo_my_unread** |
-| 哪些商机停滞了 / 长时间没动的商机 / stale leads | **odoo_crm_stale_leads** |
-| 这个商机下一步该做什么 / 给我建议 / 智能推荐 | **odoo_crm_next_action** |
-| 销售预测 / 加权管道 / 我们这个季度大概能做多少 | **odoo_sales_forecast** |
-| 把这个工单转任务 / 工单转项目 | **odoo_helpdesk_to_task** |
-| 商机赢单建项目 / 商机转项目 | **odoo_lead_to_project** |
-| 给客户发催款 / 发逾期提醒 | **odoo_invoice_send_reminder** |
-| 库存预警 / 哪些产品要补货 / 缺货预警 | **odoo_stock_low_alerts** |
-| 各个仓库库存 / 按库位看库存 | **odoo_stock_by_location** |
-| 验收这条调拨单 / 出库确认 | **odoo_stock_picking_validate** |
-| 仓库总览 / 待出库待入库 / 仓储情况 | **odoo_warehouse_dashboard** |
-| 我属于几家公司 / 公司列表 / 看公司 | **odoo_companies** |
-| 创建采购订单 / 下采购单 / 给某供应商下单 | **odoo_purchase_create** |
-| 确认采购订单 / 把这个 PO 下单 | **odoo_purchase_confirm** |
-| 采购仪表盘 / 本月采购 / 采购总览 | **odoo_purchase_dashboard** |
-| 应付账龄 / 我们欠供应商多少 / 老的未付账单 | **odoo_vendor_bill_aging** |
-| 生产订单 / MO 列表 / 在制单 | **odoo_mo_list** |
-| 确认生产订单 / 把 MO 启动 | **odoo_mo_confirm** |
-| 查 BOM / 物料清单 / 这个产品由什么组成 | **odoo_bom_query** |
-| 看会计凭证 / 凭证列表 / journal 分录 | **odoo_journal_entries** |
-| 登记付款 / 收款 / 给这张发票登记入账 | **odoo_payment_register** |
-| 科目表 / 会计科目 / 看 chart of accounts | **odoo_chart_of_accounts** |
-| 异常检测 / 系统有什么不对 / 全局健康检查 | **odoo_anomaly_detect** |
-| 老板 KPI / 一句话给我看 KPI / 公司核心指标 | **odoo_kpi_summary** |
-| 给我导这个 PO 的 PDF / 生成报表 PDF / 打印发票 | **odoo_pdf_report** |
-| 导出 CSV / 把数据导出来 / 给我生成表格 | **odoo_export_csv** |
-| 看自动化规则 / 系统里的 base.automation | **odoo_automations** |
-| 看计划任务 / 看 cron / 哪些任务在跑 | **odoo_cron_jobs** |
-| 创建自动化规则 / 加 trigger / 自动跑 | **odoo_automation_create** |
-| 重复客户 / 查重 / 联系人查重 | **odoo_data_quality_partners** |
-| 重复产品 / 重复 SKU | **odoo_data_quality_products** |
-| 数据完整性 / 缺字段 / 资料完整度 | **odoo_data_quality_completeness** |
-| 合并客户 / 合并联系人 / 把这两个 partner 合一起 | **odoo_partners_merge** |
-| 批量发邮件 / 给一批客户发模板邮件 | **odoo_batch_email** |
-| 批量归档 / 批量停用 / 批量激活 | **odoo_batch_archive** |
-| 批量改经办人 / 批量重新分配 | **odoo_batch_assign** |
-| 翻译这个字段 / 多语言 / 改成英文版 | **odoo_translate_record** |
-| 自定义字段 / x_ 开头的 / Studio 字段 | **odoo_custom_fields** |
-| 创建系统用户 / 给这个员工建账号 | **odoo_user_create** |
-| 看用户权限 / 我有哪些组 / 用户组 | **odoo_user_groups** |
-| 系统里有哪些模型 / 列模型 / Studio 模型 | **odoo_model_list** |
-| 看某模型的字段 / 这模型有哪些字段 | **odoo_model_fields** |
-| 创建自定义模型 / 加新表 / Studio 新建模型 | **odoo_model_create** |
-| 加自定义字段 / 给模型加字段 | **odoo_field_create** |
-| 这条记录改过什么 / 看变更历史 / 审计日志 | **odoo_audit_log** |
-| 谁登录过 / 登录记录 / login history | **odoo_login_history** |
-| 这字段改过几次 / 字段变更历史 | **odoo_field_history** |
-| 切换公司 / 切到 X 公司 / 改公司 | **odoo_company_switch** |
-| 集团合并报表 / 跨公司汇总 / 多公司视图 | **odoo_consolidated_dashboard** |
-| 数据透视 / pivot / 按维度聚合 | **odoo_pivot_data** |
-| 邮件日志 / 看邮件发送 / 邮件失败 | **odoo_email_log** |
-| 配 webhook / 出站 webhook / 创建 webhook | **odoo_webhook_create** |
-| 把这条记录链接发我 / 分享给客户 / portal 链接 | **odoo_record_share_url** |
-| 邮件队列 / 邮件为啥没发 / mail queue 健康 | **odoo_mail_queue** |
-| 查看当前用什么凭据 / 我的连接是哪套 / 为什么没问我密码 | **odoo_whoami** |
-| 断开连接 / 退出系统 | **odoo_disconnect** |
-
-### 常用数据模型（技术内部标识，不在正文中朗读）
-project.task · project.project · project.milestone · mail.activity · calendar.event ·
-crm.lead · crm.stage · sale.order · purchase.order · helpdesk.ticket · account.move ·
-res.partner · hr.employee · hr.leave · hr.attendance · stock.quant · stock.picking ·
-account.analytic.line · approval.request · planning.slot · knowledge.article ·
-mail.template · mail.mail · mail.followers · ir.attachment · documents.document
+> **完整 189 个工具表 + 130+ 自然语言映射**（v1.18 含 HR / 库存 / 生产 / Studio 元编程 / 审计等深度场景）：调 \`odoo_help\`（无参 = 完整表；可传 keyword="请假"/"task"/"CRM"/"知识库" 等模糊匹配）按需获取。\
+v1.19 起此处不再注入完整工具表，节省每次 prompt ~2000 tokens。
 
 ### 日期 & 字段规范
-- date 字段：YYYY-MM-DD，今天=${todayStr}，明天=${tomorrowStr}
-- datetime 字段：YYYY-MM-DD HH:MM:SS，默认上午 09:00:00，下午 14:00:00
-- 优先级：0=普通 1=中 2高 3=紧急
-- Many2one 读取返回 [id, "名称"]，写入时传数字 id
-- 商机阶段可通过 odoo_search(model="crm.stage") 查询
-- 活动类型可通过 odoo_activity_types 查询
+
+- date：YYYY-MM-DD（今天=${todayStr}，明天=${tomorrowStr}）
+- datetime：YYYY-MM-DD HH:MM:SS（默认上午 09:00:00，下午 14:00:00）
+- 优先级：0=普通 / 1=中 / 2=高 / 3=紧急
+- Many2one 读返 [id, "名称"]，写传数字 id
+- 阶段查 odoo_search(model="crm.stage") / 活动类型查 odoo_activity_types
+
+### 常用数据模型
+
+project.task · project.project · crm.lead · sale.order · purchase.order · helpdesk.ticket · account.move · res.partner · hr.employee · hr.leave · stock.picking · knowledge.article · mail.activity · calendar.event
 `.trim(),
     };
   });
 
-  api.logger.info('[odoo] before_prompt_build 钩子已注册（per-agent 隔离）');
+  api.logger.info('[odoo] before_prompt_build 钩子已注册（per-agent 隔离 / v1.19 system context 已瘦身 ~6500 字 → 调 odoo_help 按需取详）');
 }
 
 // ── 处理后端更新通知 ──────────────────────────────────────────────────────────
