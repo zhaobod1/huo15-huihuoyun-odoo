@@ -519,7 +519,9 @@ const ODOO_TOOL_TIERS = {
     'odoo_create_task', 'odoo_list_tasks', 'odoo_my_today',
     'odoo_search', 'odoo_daily_briefing',
   ]),
-  // 核心 30 个（默认）——覆盖 80% 日常需求
+  // 核心 44 个（默认）——覆盖 80% 日常需求
+  // v1.20.2: 加入 v1.20 14 个 tool（之前用 api.registerTool 直注册绕过 tier 系统，
+  //          现已统一走 register helper；为保持 default 启用语义不变，纳入 core）
   core: new Set<string>([
     // 连接&状态 (5)
     'odoo_connect', 'odoo_status', 'odoo_disconnect', 'odoo_whoami', 'odoo_help',
@@ -540,6 +542,18 @@ const ODOO_TOOL_TIERS = {
     'odoo_search', 'odoo_daily_briefing',
     // 消息 (1)
     'odoo_message_post',
+    // 审批工作流深化 (4) v1.20
+    'odoo_approval_categories', 'odoo_approval_create', 'odoo_approval_confirm', 'odoo_approval_my_pending',
+    // 记录克隆/批量导入 (3) v1.20
+    'odoo_record_clone', 'odoo_record_clone_with_lines', 'odoo_csv_import',
+    // Mail 关注/订阅 (3) v1.20
+    'odoo_followers', 'odoo_subscribe', 'odoo_unsubscribe',
+    // 资源/日历 (2) v1.20
+    'odoo_resources', 'odoo_resource_calendar',
+    // 报表订阅 (1) v1.20
+    'odoo_report_schedule',
+    // 多语言 (1) v1.20
+    'odoo_translate_get',
   ]),
 };
 
@@ -553,9 +567,24 @@ function registerTools(api: OpenClawPluginApi) {
   let skippedCount = 0;
 
   // 包装 api.registerTool —— 仅注册 tier 内的工具
+  // v1.20.2: 字段名适配 openclaw plugin SDK
+  //   旧: { schema, handler }  → 新: { parameters, execute }
+  //   不改 200+ 处 tool 定义，集中在 helper 一次转换
+  //   触发：当时 SDK 校验 typeof tool.execute !== 'function' 直接判 malformed
+  //         导致整个 plugin 50+ tool 被 loader 跳过，每次 plugin reload
+  //         (~每 90s 一次) gateway prep 阶段多 5s+
+  const toSdkTool = (opts: any) => {
+    const { schema, handler, ...rest } = opts;
+    return {
+      ...rest,
+      ...(schema !== undefined && { parameters: schema }),
+      ...(handler !== undefined && { execute: handler }),
+    };
+  };
+
   const register = <T extends { name: string }>(opts: T) => {
-    if (allowedTools === null || allowedTools.has(opts.name) || opts.name === 'odoo_help') {
-      api.registerTool(opts as unknown as Parameters<typeof api.registerTool>[0]);
+    if (allowedTools === null || allowedTools.has((opts as any).name) || (opts as any).name === 'odoo_help') {
+      api.registerTool(toSdkTool(opts) as unknown as Parameters<typeof api.registerTool>[0]);
       registeredCount += 1;
     } else {
       skippedCount += 1;
@@ -4093,7 +4122,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 审批工作流深化 4 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_approval_categories',
     description: '查审批分类列表（approval.category）。返回每个分类的 approval_minimum（需要几人审批）/ approval_type（请假/采购/差旅...）。给 odoo_approval_create 配料用。',
     schema: {
@@ -4118,7 +4147,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_approval_create',
     description: '【发起审批】创建审批请求（approval.request）+ 可选 auto_confirm=true 立即提交审批（状态从 new → pending）。reason / amount / quantity / location / partner_id 按分类需要选填。',
     schema: {
@@ -4147,7 +4176,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_approval_confirm',
     description: '【发起人侧】把已创建（new 状态）的审批请求提交审批（action_confirm，new → pending）。批量传 ids。',
     schema: {
@@ -4165,7 +4194,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_approval_my_pending',
     description: '【审批人视角】我手上待审批的请求（request_status=pending 且 approver_ids 包含当前用户）。一句话回答"我有几条要批的"。',
     schema: {
@@ -4188,7 +4217,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 数据克隆 / 导入 3 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_record_clone',
     description: '浅复制一条记录（BaseModel.copy）。Odoo 内置方法，所有 model 都有。可用 overrides 字典覆盖某些字段（如 name "[Copy] xxx"）。注意 O2m 子表复制行为各 model 不同——简单 model 自动跟，复杂 model（sale.order/mrp.bom）建议用 odoo_record_clone_with_lines。',
     schema: {
@@ -4210,7 +4239,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_record_clone_with_lines',
     description: '深度复制带子表的记录。先 copy 主记录（清空子表），再读取源子表 + 用 [0,0,vals] 重新挂到新主记录。例：sale.order 用 line_field=order_line / line_model=sale.order.line。line_fields 列出要复制的子表字段名。',
     schema: {
@@ -4235,7 +4264,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_csv_import',
     description: '【批量】把 CSV 行数据导入到任意 model。逐行 create，全数字字符串自动转 number / true|false 转 bool。返回 imported_ids[] 和 failed_rows[]。失败行不会回滚已成功的。',
     schema: {
@@ -4260,7 +4289,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- Mail 关注（3） ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_followers',
     description: '查某条记录的关注者列表（mail.followers）。每条记录可被多个 partner 关注，关注者会收到该记录的 chatter 通知。',
     schema: {
@@ -4286,7 +4315,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_subscribe',
     description: '订阅某条记录（mail_thread.message_subscribe）。partner_ids 不填默认订阅当前用户的 partner。订阅后该 partner 会收到记录的 chatter 通知。',
     schema: {
@@ -4308,7 +4337,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_unsubscribe',
     description: '取消订阅某记录（mail_thread.message_unsubscribe）。partner_ids 不填默认取消我自己的订阅。',
     schema: {
@@ -4332,7 +4361,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 资源 / 工作时间表 2 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_resources',
     description: '查询资源列表（resource.resource）。resource_type 可筛 user（员工资源）或 material（设备/会议室/物料资源）。',
     schema: {
@@ -4358,7 +4387,7 @@ function registerTools(api: OpenClawPluginApi) {
     },
   });
 
-  api.registerTool({
+  register({
     name: 'odoo_resource_calendar',
     description: '查工作时间表详情（resource.calendar）+ 自动展开 attendance_ids（每周班次：周几/几点开始/几点结束/上午下午）。用于"X 资源/员工的工作时间是怎么定义的"。',
     schema: {
@@ -4379,7 +4408,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 报表订阅 1 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_report_schedule',
     description: '【自动化】定期发送 PDF 报表订阅。组合 ir.actions.server (state=code) + ir.cron 两对象，让 cron 周期性渲染 report_ref 报表 + 写入收件箱。interval_type: minutes/hours/days/weeks/months。',
     schema: {
@@ -4408,7 +4437,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   // ---------- 多语言 1 ----------
 
-  api.registerTool({
+  register({
     name: 'odoo_translate_get',
     description: '读某条记录某字段的所有语言翻译（model.get_field_translations）。返回 { lang_code: value } 对象。和 odoo_translate_record（写）配套，用来"先看现有翻译再决定改不改"。',
     schema: {

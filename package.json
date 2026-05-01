@@ -1,6 +1,6 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.20.1",
+  "version": "1.20.2",
   "description": "火一五·辉火云企业套件插件 — 自然语言操作辉火云企业套件，企业级全场景 ERP + 系统管理 + Studio 元编程 + 工具分级助手，**204 个工具**（含 odoo_help）覆盖销售/采购/库存/生产/会计/HR/项目/CRM/客服/知识/通知/智能/报表 13 业务域 + 系统级（自动化/治理/批量/集成）+ Studio 元编程；v1.10 共享凭据；v1.11–v1.13 HR 三步走；v1.14 Analytics & Orchestration；v1.15 个人视图+CRM 智能+跨域桥+库存深化+多公司；v1.16 业务深化；v1.17 自动化与治理；v1.18 Studio 元编程+审计+多公司联动+通用 pivot+外部集成；v1.19 ⭐ 工具分级 tier（core/minimal/extended）+ odoo_help 按需查询；v1.20 审批工作流深化（categories/create/confirm/my_pending）+ 数据克隆与 CSV 导入（clone/clone_with_lines/csv_import）+ Mail 关注（followers/subscribe/unsubscribe）+ 资源与工作时间表（resources/resource_calendar）+ 报表订阅（report_schedule cron）+ 多语言读取（translate_get）",
   "type": "module",
   "main": "index.ts",
