@@ -17,3 +17,6 @@ dist/
 
 # OpenClaw local config
 openclaw.plugin.local.json
+
+# npm pack tarball
+*.tgz

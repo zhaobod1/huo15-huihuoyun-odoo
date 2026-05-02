@@ -35,6 +35,11 @@
   "devDependencies": {
     "typescript": "^5.5.0"
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "release": "bash scripts/release.sh",
+    "prepublishOnly": "npm run typecheck"
+  },
   "files": [
     "index.ts",
     "openclaw.plugin.json",
