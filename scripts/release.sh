@@ -257,7 +257,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     echo "  • git push github $TAG"
   fi
   echo "  • npm publish"
-  echo "  • clawhub publish \"\$(pwd)\" --version $VERSION"
+  echo "  • clawhub publish \"\$(pwd)\" --slug huo15-huihuoyun-odoo --version $VERSION --tags latest,plugin"
   echo
   log_ok "DRY-RUN 完成。去掉 --dry-run 即正式发版"
   exit 0
@@ -299,14 +299,17 @@ log_ok "npm publish 完成"
 log_step "clawhub publish $VERSION"
 if [[ -z "${CLAWHUB_TOKEN:-}" ]]; then
   log_warn "CLAWHUB_TOKEN 未设；从 ~/CLAUDE.md §2 取或 export 后重跑这一步"
-  log_warn "${C_YELLOW}手动收尾：CLAWHUB_TOKEN=clh_... clawhub publish \"\$(pwd)\" --version $VERSION${C_RESET}"
+  log_warn "${C_YELLOW}手动收尾：CLAWHUB_TOKEN=clh_... clawhub publish \"\$(pwd)\" --slug huo15-huihuoyun-odoo --version $VERSION --tags latest,plugin${C_RESET}"
   exit 1
 fi
-if ! clawhub publish "$(pwd)" --version "$VERSION" 2>&1 | sed 's/^/  /'; then
-  log_err "clawhub publish 失败——npm 已发；手动重跑 'CLAWHUB_TOKEN=... clawhub publish \"\$(pwd)\" --version $VERSION'"
+# v1.21.0 起锁 ClawHub slug + 加 --tags latest,plugin 让每次发版同时刷两个 tag。
+# SKILL.md frontmatter name=huo15-claude-odoo 跟实际 slug huo15-huihuoyun-odoo 不同——显式指定避免歧义。
+CLAWHUB_SLUG="huo15-huihuoyun-odoo"
+if ! clawhub publish "$(pwd)" --slug "$CLAWHUB_SLUG" --version "$VERSION" --tags latest,plugin 2>&1 | sed 's/^/  /'; then
+  log_err "clawhub publish 失败——npm 已发；手动重跑 'CLAWHUB_TOKEN=... clawhub publish \"\$(pwd)\" --slug $CLAWHUB_SLUG --version $VERSION --tags latest,plugin'"
   exit 1
 fi
-log_ok "clawhub publish 完成"
+log_ok "clawhub publish 完成（slug=$CLAWHUB_SLUG，已刷 latest+plugin 两个 tag）"
 
 echo
 log_ok "${C_GREEN}🎉 $PKG_NAME@$VERSION 全链路发版成功${C_RESET}"

@@ -9,6 +9,17 @@
 import type { OdooConfig, OdooSession, OdooRecord, OdooError } from '../types/index.js';
 import { today, tomorrow } from '../utils/date-utils.js';
 
+/**
+ * v1.21.0: RPC fetch timeout 上限（3 秒）。
+ *
+ * 背景：用户实测首字延迟 P50=16.4s/P95=54.9s，gateway.err.log 唯一报 timeout
+ * 的是 odoo `before_prompt_build` hook（每次 LLM prompt 构建前尝试 RPC 认证恢复，
+ * fetch 无 timeout 控制 → odoo 后端慢就阻塞 → OpenClaw gateway 默认 15s timeout
+ * 强行掐断）。3s 快速失败让上游 hook 拿到错误立即 fallback 到"未连接"提示，
+ * 而非死等 15s。常态 Odoo RPC <500ms，3s 留 6x 余量足够。
+ */
+const RPC_TIMEOUT_MS = 3000;
+
 type DomainItem = string | [string, string, unknown];
 type Domain = DomainItem[];
 
@@ -90,6 +101,7 @@ export class OdooClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     const data = await response.json() as { result?: string[]; error?: unknown };
@@ -4952,7 +4964,17 @@ if records:
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.session_id) headers['Cookie'] = `session_id=${this.session_id}`;
 
-    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+    // v1.21.0: 加 AbortSignal.timeout(3000) 防 odoo 后端慢导致 fetch 永久挂
+    // → 上游 OpenClaw before_prompt_build hook 卡 15s 被 gateway 强行掐断 →
+    // 用户实测首字延迟 P50=16.4s/P95=54.9s 的根因（gateway.err.log 唯一报
+    // timeout 的就是 odoo before_prompt_build handler）。3s 快速失败让上游
+    // hook 拿到错误就 fallback 到"未连接"提示，不再死等。
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
     const data = await response.json() as { result?: unknown; error?: OdooError };

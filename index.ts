@@ -329,7 +329,7 @@ export default definePluginEntry({
   description: '自然语言操作辉火云企业套件，实施经理助手，per-agent 凭据隔离',
 
   register(api: OpenClawPluginApi) {
-    // 不在启动时全局连接。每个 agent 的连接在 before_prompt_build 或 odoo_connect 时按需恢复。
+    // 不在启动时全局连接。每个 agent 的连接在 odoo_connect 时按需恢复。
     registerTools(api);
     registerHooks(api);
 
@@ -339,7 +339,21 @@ export default definePluginEntry({
       await handleInboundReply(api, reply);
     });
 
-    api.logger.info('[odoo] 辉火云企业套件插件 v1.9 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复 + 品牌化）');
+    // v1.21.0: 启动期 fire-and-forget 预热 default agent 连接
+    // 不阻塞 plugin load / gateway 启动；失败也不影响启动（hook 就显示"未连接"）。
+    // 解决"零配置 + 单用户"场景：有 manifest/共享凭据时启动后几秒内自动恢复，
+    // 不再依赖 hook 内同步 tryRestoreAgent（v1.20 之前每次 before_prompt_build
+    // 都阻塞 RPC 是首字延迟 P50=16.4s 的真凶）。多 agent 场景下其他 agent 仍按
+    // 需在 odoo_connect 时初始化。
+    void tryRestoreAgent(api, 'default').then((client) => {
+      if (client?.isAuthenticated()) {
+        api.logger.info('[odoo] 启动期 default agent 预热成功（凭据已恢复，免手动 connect）');
+      }
+    }).catch((err) => {
+      api.logger.warn(`[odoo] 启动期 default agent 预热失败（不影响启动，hook 会显示"未连接"）: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
+    api.logger.info('[odoo] 辉火云企业套件插件 v1.21.0 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复 + 品牌化 + 异步预热不阻塞）');
   },
 });
 
@@ -5918,11 +5932,15 @@ function registerHooks(api: OpenClawPluginApi) {
     const todayStr = today();
     const tomorrowStr = tomorrow();
 
-    // 尝试从持久化恢复连接（per-agent）
-    let client = odooClients.get(aid);
-    if (!client?.isAuthenticated()) {
-      client = await tryRestoreAgent(api, aid) ?? undefined;
-    }
+    // v1.21.0: 只查内存缓存，**不再走 RPC**。
+    // 旧版 v1.20-：每次 before_prompt_build 都调 tryRestoreAgent → 内部走
+    // OdooClient.authenticate() RPC fetch（无 timeout）→ odoo 后端慢就阻塞 →
+    // OpenClaw gateway 默认 15s timeout 强行掐断 → 用户实测首字延迟 P50=16.4s。
+    // hook 是高频路径（每次 LLM prompt 构建前都触发），绝不能做重 IO。
+    // 凭据恢复改成：① register() 启动期 fire-and-forget 预热 default agent；
+    //              ② 用户主动调 odoo_connect 工具；
+    //              ③ rpc() 加 AbortSignal.timeout(3000) 兜底（防其他路径再卡）。
+    const client = odooClients.get(aid);
 
     if (!client?.isAuthenticated()) {
       return {
