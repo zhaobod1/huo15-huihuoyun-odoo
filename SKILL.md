@@ -1,8 +1,8 @@
 ---
 name: huo15-claude-odoo
 displayName: 火一五·辉火云企业套件插件
-description: 自然语言操作 辉火云企业套件 — 实施经理助手，覆盖任务/CRM/项目/工单/财务/销售/HR/库存/生产/客服/知识/Studio 元编程 13 业务域 204 个工具。v1.21.0 关键性能修复：before_prompt_build hook 改为只查内存缓存（不再走 RPC 永久挂）+ RPC fetch 加 AbortSignal.timeout(3000) + 启动期异步预热 default agent，首字延迟 P50 从 16.4s 期望降到 <3s。Use when：接 Odoo/辉火云、企业 ERP 操作、CRM/任务/财务/工单管理、自然语言企微/钉钉调用 ERP。
-version: 1.21.0
+description: 自然语言操作 辉火云企业套件 — 实施经理助手，覆盖任务/CRM/项目/工单/财务/销售/HR/库存/生产/客服/知识/Studio 元编程 13 业务域 204 个工具。v1.22.0 重点：odoo_sale_orders / odoo_purchase_orders 加 name（按 'S00016' 编号查）+ record_id + include_lines（一次拿明细+合计+税额+付款条件，写合同/对账免 N+1 RPC）+ description 强化（防 LLM 偏向 exec/curl 手写 JSON-RPC）。继承 v1.21 hook RPC 永久挂修复（首字延迟 P50 16.4s→<3s）+ v1.20 审批工作流。Use when：接 Odoo/辉火云、企业 ERP 操作、CRM/任务/财务/销售/工单管理、自然语言企微/钉钉调用 ERP、写销售/采购合同需要订单明细。
+version: 1.22.0
 ---
 
 # 辉火云企业套件插件使用指南

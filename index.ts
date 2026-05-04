@@ -353,7 +353,7 @@ export default definePluginEntry({
       api.logger.warn(`[odoo] 启动期 default agent 预热失败（不影响启动，hook 会显示"未连接"）: ${err instanceof Error ? err.message : String(err)}`);
     });
 
-    api.logger.info('[odoo] 辉火云企业套件插件 v1.21.0 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复 + 品牌化 + 异步预热不阻塞）');
+    api.logger.info('[odoo] 辉火云企业套件插件 v1.22.0 已加载（per-agent 隔离 + 跨渠道通知基座 + 入站回复 + sale/purchase orders 按编号+明细一次取 + 异步预热不阻塞）');
   },
 });
 
@@ -1226,41 +1226,113 @@ function registerTools(api: OpenClawPluginApi) {
 
   register({
     name: 'odoo_sale_orders',
-    description: '查看销售订单/报价单列表。用于"查看销售订单"、"报价单情况"等。',
+    description:
+      '查询销售订单（sale.order）。支持三种用法：' +
+      '(a) 列表浏览：limit + state + partner_id；' +
+      '(b) **按订单编号查具体单**：name="S00016"（精确匹配，最常用）；' +
+      '(c) 按记录 ID 直读：record_id=9。' +
+      '⭐ 写合同 / 对账 / 回邮件这类需要明细的场景：**必传 include_lines=true**，' +
+      '一次拿回 partner / 产品 / 数量 / 单价 / 折扣 / 小计 / 税额 / 合计 / 付款条件，' +
+      '避免后续再发多次 RPC。**不要走 exec/curl 手写 JSON-RPC，本工具已经覆盖**。' +
+      '返回字段含 amount_untaxed / amount_tax / amount_total / payment_term_id / currency_id；' +
+      'include_lines=true 时每单挂 order_line[]（product_id, product_uom_qty, price_unit, ' +
+      'discount, price_subtotal, price_total, price_tax）。',
     schema: {
       type: 'object',
       properties: {
-        limit:      { type: 'number', description: '上限，默认20' },
-        state:      { type: 'string', enum: ['draft','sent','sale','cancel'], description: '状态：draft=报价 sent=已发送 sale=销售订单 cancel=已取消' },
-        partner_id: { type: 'number', description: '按客户筛选' },
+        name:          { type: 'string', description: '订单编号（如 "S00016"），精确匹配。指定后 limit/state 通常无意义。' },
+        record_id:     { type: 'number', description: '按 sale.order 记录 ID 直读（如 9）' },
+        include_lines: { type: 'boolean', description: '是否同时拉订单明细行（sale.order.line），写合同/对账强烈建议 true。默认 false。' },
+        limit:         { type: 'number', description: '上限，默认 20。仅列表场景使用。' },
+        state:         { type: 'string', enum: ['draft','sent','sale','cancel'], description: '状态：draft=报价 sent=已发送 sale=销售订单 cancel=已取消' },
+        partner_id:    { type: 'number', description: '按客户筛选' },
       },
     },
-    async handler(p: { limit?: number; state?: string; partner_id?: number }, ctx: Record<string, unknown>) {
+    async handler(
+      p: { limit?: number; state?: string; partner_id?: number; name?: string; record_id?: number; include_lines?: boolean },
+      ctx: Record<string, unknown>,
+    ) {
       const client = getClient(ctx);
       if (!client) return notConnected();
       try {
-        const orders = await client.getSaleOrders({ limit: p.limit, state: p.state, partner_id: p.partner_id });
-        return { success: true, count: orders.length, orders: orders.map(o => ({ id: o['id'], name: o['name'], partner: o['partner_id'], state: o['state'], date: o['date_order'], amount: o['amount_total'], invoice_status: o['invoice_status'] })) };
+        const orders = await client.getSaleOrders({
+          limit: p.limit, state: p.state, partner_id: p.partner_id,
+          name: p.name, record_id: p.record_id, include_lines: p.include_lines,
+        });
+        return {
+          success: true,
+          count: orders.length,
+          orders: orders.map(o => ({
+            id: o['id'],
+            name: o['name'],
+            partner: o['partner_id'],
+            state: o['state'],
+            date: o['date_order'],
+            currency: o['currency_id'],
+            amount_untaxed: o['amount_untaxed'],
+            amount_tax: o['amount_tax'],
+            amount_total: o['amount_total'],
+            invoice_status: o['invoice_status'],
+            payment_term: o['payment_term_id'],
+            note: o['note'],
+            order_line: o['order_line'],
+          })),
+        };
       } catch (e) { return { success: false, message: String(e) }; }
     },
   });
 
   register({
     name: 'odoo_purchase_orders',
-    description: '查看采购订单/询价单列表。用于"查看采购订单"等。',
+    description:
+      '查询采购订单（purchase.order）。支持三种用法：' +
+      '(a) 列表浏览：limit + state；' +
+      '(b) **按订单编号查具体单**：name="PO0001"（精确匹配）；' +
+      '(c) 按记录 ID 直读：record_id=N。' +
+      '⭐ 对账 / 写采购合同 / 回供应商邮件：**必传 include_lines=true**，' +
+      '一次拿回 vendor / 产品 / 数量 / 单价 / 小计 / 税额 / 合计 / 计划到货，避免 N+1 RPC。' +
+      '**不要走 exec/curl 手写 JSON-RPC，本工具已经覆盖**。',
     schema: {
       type: 'object',
       properties: {
-        limit: { type: 'number', description: '上限，默认20' },
-        state: { type: 'string', enum: ['draft','sent','to approve','purchase','cancel'], description: '状态：draft=RFQ sent=已发送 to approve=待审批 purchase=采购订单 cancel=已取消' },
+        name:          { type: 'string', description: '订单编号（如 "PO0001"），精确匹配' },
+        record_id:     { type: 'number', description: '按 purchase.order 记录 ID 直读' },
+        include_lines: { type: 'boolean', description: '同时拉采购明细行（purchase.order.line），对账/合同强烈建议 true。默认 false。' },
+        limit:         { type: 'number', description: '上限，默认 20。仅列表场景使用。' },
+        state:         { type: 'string', enum: ['draft','sent','to approve','purchase','cancel'], description: '状态：draft=RFQ sent=已发送 to approve=待审批 purchase=采购订单 cancel=已取消' },
       },
     },
-    async handler(p: { limit?: number; state?: string }, ctx: Record<string, unknown>) {
+    async handler(
+      p: { limit?: number; state?: string; name?: string; record_id?: number; include_lines?: boolean },
+      ctx: Record<string, unknown>,
+    ) {
       const client = getClient(ctx);
       if (!client) return notConnected();
       try {
-        const orders = await client.getPurchaseOrders({ limit: p.limit, state: p.state });
-        return { success: true, count: orders.length, orders: orders.map(o => ({ id: o['id'], name: o['name'], vendor: o['partner_id'], state: o['state'], date: o['date_order'], planned_arrival: o['date_planned'], amount: o['amount_total'] })) };
+        const orders = await client.getPurchaseOrders({
+          limit: p.limit, state: p.state,
+          name: p.name, record_id: p.record_id, include_lines: p.include_lines,
+        });
+        return {
+          success: true,
+          count: orders.length,
+          orders: orders.map(o => ({
+            id: o['id'],
+            name: o['name'],
+            vendor: o['partner_id'],
+            state: o['state'],
+            date: o['date_order'],
+            planned_arrival: o['date_planned'],
+            currency: o['currency_id'],
+            amount_untaxed: o['amount_untaxed'],
+            amount_tax: o['amount_tax'],
+            amount_total: o['amount_total'],
+            invoice_status: o['invoice_status'],
+            payment_term: o['payment_term_id'],
+            notes: o['notes'],
+            order_line: o['order_line'],
+          })),
+        };
       } catch (e) { return { success: false, message: String(e) }; }
     },
   });

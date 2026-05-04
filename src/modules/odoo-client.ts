@@ -335,16 +335,42 @@ export class OdooClient {
 
   async getSaleOrders(options: {
     limit?: number; state?: string; partner_id?: number; user_id?: number;
+    /** v1.22: 按订单编号精确查（如 "S00016"） */
+    name?: string;
+    /** v1.22: 按记录 ID 精确取 */
+    record_id?: number;
+    /** v1.22: 同时拉订单明细行（sale.order.line），写合同/对账常用 */
+    include_lines?: boolean;
   } = {}): Promise<OdooRecord[]> {
     const domain: Domain = [];
+    if (options.name) domain.push(['name', '=', options.name]);
+    if (options.record_id) domain.push(['id', '=', options.record_id]);
     if (options.state) domain.push(['state', '=', options.state]);
-    else domain.push(['state', 'not in', ['cancel']]);
+    else if (!options.name && !options.record_id) domain.push(['state', 'not in', ['cancel']]);
     if (options.partner_id) domain.push(['partner_id', '=', options.partner_id]);
     if (options.user_id) domain.push(['user_id', '=', options.user_id]);
     const result = await this.searchRead('sale.order', domain,
-      ['id', 'name', 'partner_id', 'state', 'date_order', 'amount_total', 'invoice_status', 'user_id', 'team_id', 'validity_date'],
+      ['id', 'name', 'partner_id', 'state', 'date_order', 'amount_total', 'amount_untaxed', 'amount_tax',
+        'invoice_status', 'user_id', 'team_id', 'validity_date', 'currency_id', 'note', 'payment_term_id'],
       { limit: options.limit ?? 20, order: 'date_order desc' });
-    return result.records;
+
+    if (!options.include_lines || result.records.length === 0) return result.records;
+
+    // v1.22: 一次拉所有 lines，避免 N+1
+    const orderIds = result.records.map(o => o['id'] as number);
+    const lines = await this.searchRead('sale.order.line',
+      [['order_id', 'in', orderIds]],
+      ['id', 'order_id', 'product_id', 'name', 'product_uom_qty', 'qty_delivered', 'qty_invoiced',
+        'product_uom', 'price_unit', 'discount', 'price_subtotal', 'price_total', 'price_tax'],
+      { order: 'order_id asc, sequence asc' });
+    const linesByOrder = new Map<number, OdooRecord[]>();
+    for (const ln of lines.records) {
+      const oid = (Array.isArray(ln['order_id']) ? ln['order_id'][0] : ln['order_id']) as number;
+      const arr = linesByOrder.get(oid) ?? [];
+      arr.push(ln);
+      linesByOrder.set(oid, arr);
+    }
+    return result.records.map(o => ({ ...o, order_line: linesByOrder.get(o['id'] as number) ?? [] }));
   }
 
   async confirmSaleOrder(orderId: number): Promise<unknown> {
@@ -353,14 +379,41 @@ export class OdooClient {
 
   // ==================== Purchase ====================
 
-  async getPurchaseOrders(options: { limit?: number; state?: string } = {}): Promise<OdooRecord[]> {
+  async getPurchaseOrders(options: {
+    limit?: number; state?: string;
+    /** v1.22: 按订单编号精确查（如 "PO0001"） */
+    name?: string;
+    /** v1.22: 按记录 ID 精确取 */
+    record_id?: number;
+    /** v1.22: 同时拉采购明细行（purchase.order.line） */
+    include_lines?: boolean;
+  } = {}): Promise<OdooRecord[]> {
     const domain: Domain = [];
+    if (options.name) domain.push(['name', '=', options.name]);
+    if (options.record_id) domain.push(['id', '=', options.record_id]);
     if (options.state) domain.push(['state', '=', options.state]);
-    else domain.push(['state', 'not in', ['cancel']]);
+    else if (!options.name && !options.record_id) domain.push(['state', 'not in', ['cancel']]);
     const result = await this.searchRead('purchase.order', domain,
-      ['id', 'name', 'partner_id', 'state', 'date_order', 'date_planned', 'amount_total', 'invoice_status', 'user_id'],
+      ['id', 'name', 'partner_id', 'state', 'date_order', 'date_planned', 'amount_total', 'amount_untaxed', 'amount_tax',
+        'invoice_status', 'user_id', 'currency_id', 'notes', 'payment_term_id'],
       { limit: options.limit ?? 20, order: 'date_order desc' });
-    return result.records;
+
+    if (!options.include_lines || result.records.length === 0) return result.records;
+
+    const orderIds = result.records.map(o => o['id'] as number);
+    const lines = await this.searchRead('purchase.order.line',
+      [['order_id', 'in', orderIds]],
+      ['id', 'order_id', 'product_id', 'name', 'product_qty', 'qty_received', 'qty_invoiced',
+        'product_uom', 'price_unit', 'price_subtotal', 'price_total', 'price_tax', 'date_planned'],
+      { order: 'order_id asc, sequence asc' });
+    const linesByOrder = new Map<number, OdooRecord[]>();
+    for (const ln of lines.records) {
+      const oid = (Array.isArray(ln['order_id']) ? ln['order_id'][0] : ln['order_id']) as number;
+      const arr = linesByOrder.get(oid) ?? [];
+      arr.push(ln);
+      linesByOrder.set(oid, arr);
+    }
+    return result.records.map(o => ({ ...o, order_line: linesByOrder.get(o['id'] as number) ?? [] }));
   }
 
   // ==================== Helpdesk ====================

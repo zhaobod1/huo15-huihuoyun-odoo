@@ -1,7 +1,7 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.21.0",
-  "description": "火一五·辉火云企业套件插件 v1.21.0 — **关键性能修复**：before_prompt_build hook 不再每次走 RPC 认证恢复（fetch 无 timeout 永久挂 → OpenClaw 15s 强行掐断 → 用户实测首字延迟 P50=16.4s/P95=54.9s 的真凶）。改成：① hook 只查内存缓存；② RPC fetch 加 AbortSignal.timeout(3000) 兜底；③ register() 启动期 fire-and-forget 预热 default agent。期望首字延迟 P50→<3s。继承 v1.20 审批工作流深化、v1.19 工具分级 tier、204 个工具覆盖销售/采购/库存/生产/会计/HR/项目/CRM/客服/知识/通知/智能/报表 13 业务域 + 系统级 + Studio 元编程。",
+  "version": "1.22.0",
+  "description": "火一五·辉火云企业套件插件 v1.22.0 — odoo_sale_orders / odoo_purchase_orders 加 name（按 'S00016' 编号查）+ record_id（按 ID 取）+ include_lines（一次拿明细+合计+税额+付款条件，写合同/对账免 N+1 RPC）。description 强化：明确 prompt LLM '不要走 exec/curl 手写 JSON-RPC，本工具已经覆盖'，避免 deepseek 类模型偏向自己 hack。继承 v1.21 hook RPC 永久挂修复（首字延迟 P50 16.4s → <3s）+ v1.20 审批工作流 + v1.19 工具分级 tier + 204 工具覆盖 13 业务域 + Studio 元编程。",
   "type": "module",
   "main": "index.ts",
   "openclaw": {
