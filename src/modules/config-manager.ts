@@ -1,15 +1,17 @@
 /**
- * 辉火云企业套件插件配置管理器 — v3（共享凭据 + per-agent override）
+ * 辉火云企业套件插件配置管理器 — v4（per-agent 默认 + shared override）
  *
- * **v1.10 模型变化**：
- *   - 默认凭据是"共享"的，存在 `default.json`；企微/钉钉/飞书任何渠道的任何
- *     agent 在没有自己独立配置时都自动 fallback 到共享凭据。
- *   - 某个 agent 想用自己的独立凭据，调用 odoo_connect 时传 private=true，
- *     配置会写入 `{agentId}.json`，只对该 agent 生效（优先级高于 shared）。
+ * **v1.23.0 默认权限模型反转**：
+ *   v1.10–v1.22 默认 shared（全员共用一个 Odoo 账号），导致 Odoo 内部 RBAC
+ *   失效（销售/管理员看到的数据完全一样）。v1.23 起反转默认：
+ *   - 默认 scope='agent' —— 每个渠道（企微/钉钉/飞书）的每个 sender_id 配自己
+ *     的辉火云账号，写入 `{agentId}.json`，与 Odoo 内部权限对齐。
+ *   - 仅当用户明确说"组织共用"/"配一次大家都用"时才传 shared=true 写入
+ *     `default.json`，作为兜底 fallback。
  *
  * **Fallback 链**（load 时自动走一遍）：
- *   1) `{agentId}.json`     — 该 agent 显式独立配置（最高优先级）
- *   2) `default.json`       — 共享凭据（首次 connect 默认写这里）
+ *   1) `{agentId}.json`     — 该 agent 自己的独立凭据（默认写这里）
+ *   2) `default.json`       — 组织共享凭据（fallback，仅当显式 shared=true 时写）
  *   3) `pluginConfig.odoo`  — 由 openclaw.plugin.json 注入的静态配置（manifest 预填）
  *   4) legacy `odoo-config.json` — 旧版单文件，向下兼容
  *
@@ -136,13 +138,15 @@ export class ConfigManager {
    *
    * @param odooConfig 要保存的凭据
    * @param agentId    当前 agent（决定 scope=agent 时写哪个文件）
-   * @param scope      'shared'（默认）写到 default.json，全员共用；
-   *                   'agent' 写到 {agentId}.json，仅当前 agent
+   * @param scope      'agent'（v1.23 起默认）写到 {agentId}.json，仅当前 sender_id
+   *                   生效，配合 Odoo 内部 RBAC 区分权限；
+   *                   'shared' 写到 default.json，全员共用同一 Odoo 账号（Odoo
+   *                   RBAC 失效，仅适合"组织内只有一个 Odoo 公共只读账号"场景）。
    */
   saveOdooConfig(
     odooConfig: OdooConfig,
     agentId: string = SHARED_AGENT_ID,
-    scope: 'shared' | 'agent' = 'shared',
+    scope: 'shared' | 'agent' = 'agent',
   ): boolean {
     const targetPath = scope === 'agent'
       ? this.agentPath(agentId)

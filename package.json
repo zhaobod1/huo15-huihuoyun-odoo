@@ -1,7 +1,7 @@
 {
   "name": "@huo15/huo15-huihuoyun-odoo",
-  "version": "1.22.0",
-  "description": "火一五·辉火云企业套件插件 v1.22.0 — odoo_sale_orders / odoo_purchase_orders 加 name（按 'S00016' 编号查）+ record_id（按 ID 取）+ include_lines（一次拿明细+合计+税额+付款条件，写合同/对账免 N+1 RPC）。description 强化：明确 prompt LLM '不要走 exec/curl 手写 JSON-RPC，本工具已经覆盖'，避免 deepseek 类模型偏向自己 hack。继承 v1.21 hook RPC 永久挂修复（首字延迟 P50 16.4s → <3s）+ v1.20 审批工作流 + v1.19 工具分级 tier + 204 工具覆盖 13 业务域 + Studio 元编程。",
+  "version": "1.23.0",
+  "description": "火一五·辉火云企业套件插件 v1.23.0 — 默认权限模型反转：odoo_connect 默认按 sender_id 隔离（每个企微/钉钉/飞书成员配自己的 Odoo 账号，与内部 RBAC 对齐：销售看销售的、管理员看管理员的）；新参数 shared（默认 false），旧 private 标 deprecated 但仍兼容；prompt supplement 加附件硬规则（不替用户判断'附件内容是否相符'后打回用户的越权行为）。继承 v1.22 record_id+include_lines / v1.21 hook RPC 永久挂修复（首字延迟 P50 16.4s→<3s）/ v1.20 审批工作流 / 204 工具覆盖 13 业务域 + Studio 元编程。",
   "type": "module",
   "main": "index.ts",
   "openclaw": {

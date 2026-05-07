@@ -611,7 +611,7 @@ function registerTools(api: OpenClawPluginApi) {
 
   register({
     name: 'odoo_connect',
-    description: '连接辉火云企业套件。默认保存为【共享凭据】—— 组织内所有渠道（企微/钉钉/飞书）的所有 agent 都会自动复用，无需每个人重新输入。如需给当前会话单独使用一套专属凭据，传 private=true。db 为可选，不传则自动检测（单库自动、多库返回列表）。',
+    description: '连接辉火云企业套件。**默认按当前 sender_id 隔离保存**（每个企微/钉钉/飞书成员配自己的辉火云账号，与 Odoo 内部 RBAC 对齐：销售看销售的、管理员看管理员的）。仅当用户明确说"组织共用一个账号"/"配一次大家都用"时才传 shared=true（写入全员 fallback，会让 Odoo RBAC 失效，所有人看到的数据一致）。db 为可选，不传则自动检测（单库自动、多库返回列表）。',
     schema: {
       type: 'object',
       properties: {
@@ -619,12 +619,13 @@ function registerTools(api: OpenClawPluginApi) {
         db:       { type: 'string', description: '数据库名称（可选，只有一个数据库时可省略）' },
         username: { type: 'string', description: '用户名（邮箱或登录名）' },
         password: { type: 'string', description: '密码' },
-        private:  { type: 'boolean', description: '可选，默认 false。true = 仅保存为当前会话专属凭据（只覆盖当前 agent）；false = 保存为组织共享凭据（全员复用，推荐）' },
+        shared:   { type: 'boolean', description: '可选，默认 false。false = 仅保存为当前 sender_id 专属凭据（推荐，权限按 Odoo 用户区分）；true = 保存为全员共享凭据（所有成员共用同一账号，Odoo RBAC 失效）。仅当用户明确说"组织共用"才传 true。' },
+        private:  { type: 'boolean', description: '【已废弃，仅向下兼容 v1.22-】保留以兼容旧 agent memory；新调用请用 shared 参数（语义相反）。如同时传 private 和 shared，shared 优先。' },
       },
       required: ['url', 'username', 'password'],
     },
     async handler(
-      params: { url: string; db?: string; username: string; password: string; private?: boolean },
+      params: { url: string; db?: string; username: string; password: string; shared?: boolean; private?: boolean },
       ctx: Record<string, unknown>,
     ) {
       const aid = getAgentId(ctx);
@@ -646,13 +647,23 @@ function registerTools(api: OpenClawPluginApi) {
       }
 
       const cfg = { url: params.url, db, username: params.username, password: params.password };
-      const scope: 'shared' | 'agent' = params.private ? 'agent' : 'shared';
+      // v1.23.0 默认反转：shared 显式传了用 shared，否则看 private 兼容（!private = agent），都没传 = agent
+      let scope: 'shared' | 'agent';
+      if (typeof params.shared === 'boolean') {
+        scope = params.shared ? 'shared' : 'agent';
+      } else if (typeof params.private === 'boolean') {
+        // 旧参数兼容：private=true → agent（同 v1.22 行为），private=false → 旧默认是 shared，但 v1.23 默认改了，
+        // 这里维持"显式传 private=false"的语义为 shared（仅兼容老 agent 主动传 false 的场景）。
+        scope = params.private ? 'agent' : 'shared';
+      } else {
+        scope = 'agent';
+      }
       try {
         await initOdooClient(api, cfg, aid);
         configManager.saveOdooConfig(cfg, aid, scope);
         const scopeMsg = scope === 'shared'
-          ? '已保存为【共享凭据】—— 组织内所有渠道的 @ 机器人用户都会自动使用这套凭据，无需再输入。'
-          : '已保存为【当前会话专属凭据】—— 只对当前 agent 生效，不影响其他成员。';
+          ? '已保存为【组织共享凭据】—— 全员共用同一账号，Odoo 内部权限不再区分人。如要改回每人独立账号（推荐），让对方调 odoo_connect 不传 shared 即可。'
+          : '已保存为【你自己的专属凭据】—— 只对当前 sender_id 生效，权限按你的 Odoo 账号区分（销售/管理员/财务等）。其他同事 @ 机器人时各自配自己的账号即可。';
         return {
           success: true,
           scope,
@@ -748,7 +759,7 @@ function registerTools(api: OpenClawPluginApi) {
         manifestConfigExists: !!fromManifest,
         message: connected
           ? `当前 @ 机器人会话已连接到 ${info?.url}（用户 ${info?.username}），凭据来源：${sourceLabel[source]}。`
-          : `当前会话尚未连接。${configManager.hasSharedConfig() ? '组织已配共享凭据但本会话还没激活，下一次操作会自动连接。' : (fromManifest ? '插件 manifest 已预填凭据，下一次操作会自动连接。' : '需要先调用 odoo_connect 配置凭据（默认会保存为全员共享）。')}`,
+          : `当前会话尚未连接。${configManager.hasSharedConfig() ? '组织有共享 fallback 凭据但当前 sender_id 还没自己配过，下一次操作会用共享凭据；建议你 odoo_connect 配自己的账号以获得对应权限。' : (fromManifest ? '插件 manifest 已预填凭据，下一次操作会自动连接。' : '需要先调用 odoo_connect 配置凭据（默认按你自己的 sender_id 隔离保存，权限按你的 Odoo 账号区分）。')}`,
       };
     },
   });
@@ -6015,6 +6026,7 @@ function registerHooks(api: OpenClawPluginApi) {
     const client = odooClients.get(aid);
 
     if (!client?.isAuthenticated()) {
+      const hasShared = configManager.hasSharedConfig();
       return {
         appendSystemContext: `
 ## 辉火云企业套件插件 — 未连接
@@ -6024,31 +6036,45 @@ function registerHooks(api: OpenClawPluginApi) {
 > 和工具名（odoo_xxx）是技术标识符，仅在调试说明里出现，不要在面向用户的
 > 正文里直接朗读。
 
-> **共享凭据规则（v1.10）**：组织内只需有任意一个人配过一次凭据（默认会保存
-> 为【组织共享凭据】），后续任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人时，
-> **自动复用同一套凭据，禁止再次询问 URL/用户名/密码**。本会话之所以走到
-> "未连接"，是因为还没有任何人配过共享凭据，也没有 manifest 静态预填。
+> **凭据隔离规则（v1.23 默认反转）**：v1.23 起 odoo_connect **默认按当前
+> sender_id 隔离**保存（每个企微/钉钉/飞书成员配自己的辉火云账号），与 Odoo
+> 内部 RBAC 对齐 —— 销售看销售的数据，管理员看管理员的数据，权限不混淆。
+> **绝不要主动建议"配一次全员共用"**，那会让 Odoo RBAC 失效（所有人看到的
+> 数据完全一样，违背权限隔离初衷）。仅当用户明确说"组织内大家共用一个公共
+> 只读账号"时，才用 odoo_connect(shared=true) 写入全员 fallback。
 
-插件已加载，当前 agent (\`${aid}\`) 尚未连接到辉火云企业套件，且组织内也没有任何人配过共享凭据。当用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你应该：
+插件已加载，当前 agent (\`${aid}\`) 尚未连接到辉火云企业套件${hasShared ? '（组织有 shared fallback，但建议本 sender_id 配自己的账号以获得对应权限）' : ''}。当用户提到任何 ERP 相关操作（待办、任务、商机、客户、订单、工单、发票、会议、提醒、项目、工时、库存、员工、审批等），你应该：
 
-1. **首先说明**："看起来咱们组织还没有人配过辉火云连接。配一次之后，所有同事 @ 我都能用，不需要再输入。"
+1. **首先说明**："要使用辉火云企业套件，告诉我你的辉火云账号信息。每个同事用自己的账号，权限按你的 Odoo 角色区分（销售看销售的、管理员看管理员的）。"
 2. 询问：
    - **公司系统地址**（URL）：例如 https://www.huo15.com
    - **用户名**（邮箱或登录名）
    - **密码**
 3. **数据库名不需要主动询问** — odoo_connect 会自动检测（单库自动选、多库返列表）
-4. 收集到 URL、用户名、密码后，调用 **odoo_connect**（默认 \`private=false\`，即保存为共享凭据 — 推荐）
-5. 仅当用户明确说"只给我自己用"或"我不想让别人用"时，才传 \`private: true\`
-6. **重要**：如果用户在群里 @ 你，更要解释清楚"配一次全员通用"，避免每个成员都被反复问凭据
+4. 收集到 URL、用户名、密码后，调用 **odoo_connect**（默认就是 sender_id 隔离，不需要传 shared）
+5. **绝不要**主动说"配一次全员通用"或"组织内所有同事都能用"。每个 sender_id 配自己的，是 v1.23 默认行为，也是用户期望的权限模型
+6. 仅当用户明确说"我们组织共用一个 Odoo 公共账号"时才传 \`shared: true\`
 
-示例引导话术："要使用辉火云企业套件，配一次咱们组织所有同事就都能用了。请告诉我：1) 系统地址 2) 用户名 3) 密码"`.trim(),
+示例引导话术："要使用辉火云企业套件，请告诉我你的账号：1) 系统地址 2) 用户名 3) 密码。每位同事用自己的账号配一次，系统按你的 Odoo 角色给权限。"
+
+---
+
+## 附件 / 文件内容判断 — 硬规则
+
+> 用户上传压缩包/文档/Excel 让你建商机、创建任务、写工单等操作时：
+>
+> 1. **附件内容由用户负责**。不要解读"内容是不是跟商机字段对得上"、"这文件像不像 ERP 数据"。即便附件是工厂排产、菜单、随便一个 PDF，也直接按用户意图建记录。
+> 2. 解压/读附件**仅用于提取用户明示的字段**（如用户说"客户名取里面表头第一行"），不主动做"内容相符性"判断后打回用户。
+> 3. **正确的工作流**：先根据用户口头说的字段（公司名/金额/阶段等）调 \`odoo_crm_create\` 建商机 → 再用 \`odoo_attach_file\` 把附件挂到该 crm.lead → 完成回报"商机 #X 已创建并附上文件"。
+> 4. 用户没说要看附件内容时**绝不主动解析后质疑**用户。常见错误回复：「我解压出来的内容跟商机对不上，你发错了吗？」 ❌ —— 这是越权。
+> 5. 只有用户**明确问**"这附件是什么"时才解读内容。`.trim(),
       };
     }
 
     const info = client.getSessionInfo();
     const credSource = configManager.getActiveSource(aid);
-    const credSourceLabel = credSource === 'agent' ? '当前会话专属凭据'
-      : credSource === 'shared' ? '组织共享凭据（全员复用）'
+    const credSourceLabel = credSource === 'agent' ? '当前 sender_id 专属凭据（推荐）'
+      : credSource === 'shared' ? '组织共享 fallback 凭据（全员共用同一账号，Odoo RBAC 失效）'
       : credSource === 'legacy' ? '历史遗留凭据'
       : 'manifest 静态预填';
     return {
@@ -6057,9 +6083,12 @@ function registerHooks(api: OpenClawPluginApi) {
 
 > **品牌口径**：对外称"辉火云企业套件"或"辉火云"，禁出现"Odoo"等第三方 ERP 商标。技术标识符（odoo_*、project.task）仅在调试里出现，面向用户的正文用中文业务术语（"任务"/"商机"/"工单"/"内部动态"）。
 
-> **共享凭据规则（v1.10）**：当前凭据来源【${credSourceLabel}】。
-> 共享凭据 = 全员复用，任何渠道（企微/钉钉/飞书）的任何成员 @ 机器人都用这套，**绝对不要再问 URL/用户名/密码**。
-> 用户要换凭据时调 odoo_connect（默认 private=false 共享）；用户问"为什么没问密码"时调 odoo_whoami。
+> **凭据隔离规则（v1.23 默认反转）**：当前凭据来源【${credSourceLabel}】。
+> v1.23 起 odoo_connect 默认 sender_id 隔离（每人自己一份），与 Odoo 内部 RBAC 对齐。已连接后**不要再问 URL/用户名/密码**。
+> 若 credSource=shared 且用户问"为什么权限不区分"——告诉他可以让每个同事各自调 odoo_connect 配自己账号即可（默认就是 sender_id 隔离，会覆盖 shared fallback）。
+> 用户要换凭据时调 odoo_connect（默认就是 sender_id 隔离，不需要传 shared）；用户问"为什么没问密码"时调 odoo_whoami。
+
+> **附件硬规则**：用户上传文件让你建商机/任务/工单时，**附件内容由用户负责**，不解读"内容是否相符"打回用户。直接按用户口头字段建记录 → \`odoo_attach_file\` 挂附件 → 回报完成。常见错误「解压看到内容跟商机对不上你发错了吗」❌ 是越权，绝不要这样答。
 
 **用户：** ${info.username}（uid: ${info.uid}）| **系统：** ${info.url} | **agent：** ${aid}
 **凭据来源：** ${credSourceLabel}
